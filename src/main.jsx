@@ -3,9 +3,9 @@ import { createRoot } from "react-dom/client";
 import { Activity, AlertTriangle, BarChart3, CheckCircle2, ChevronLeft, Clock, Dumbbell, Flame, Lock, Play, Rocket, RotateCcw, Shield, Target, XCircle } from "lucide-react";
 import "./styles.css";
 import { getProblemConfig, problemOptions } from "./problemConfigs";
-import { analyzeAntiFallWithGemini, analyzeLaunchWithGemini } from "./services/gemini";
+import { analyzeAntiFallWithGemini, analyzeLaunchWithGemini, generateLaunchQuestionnaireWithGemini } from "./services/gemini";
 import {
-  buildGeminiPayload, fallbackAnalysis, getCombinedStats, getLaunchStats, getLocalLaunchProtocol, getStats,
+  buildGeminiPayload, fallbackAnalysis, getCombinedStats, getLaunchStats, getLocalLaunchPlan, getLocalLaunchQuestionnaire, getStats,
   markActiveFailureIfNeeded, readHistory, readLaunchHistory, recordProtocolStarted, saveActiveProtocol,
   saveLaunch, saveProtocol, updateActiveProtocol, updateLatestLaunch
 } from "./services/storage";
@@ -18,7 +18,7 @@ const initialProtocol = {
 
 const initialLaunch = {
   task: "", desiredResult: "", blockage: "", customBlockage: "", excuse: "", analysis: null,
-  duration: 10, actualResult: "", completed: false, startedAt: "", saved: false
+  questionnaire: null, answers: {}, duration: 10, actualResult: "", completed: false, startedAt: "", saved: false
 };
 
 const launchBlockages = [
@@ -141,16 +141,32 @@ function App() {
     setLaunchStep("task");
   }
 
+  async function generateLaunchQuestionnaire() {
+    const local = getLocalLaunchQuestionnaire(launch.task, effectiveBlockage(launch));
+    patchLaunch({ questionnaire: local, answers: {} });
+    setLaunchStep("questionnaire");
+    setLoading(true);
+    const result = await generateLaunchQuestionnaireWithGemini({
+      task: launch.task, desiredResult: launch.desiredResult, blockage: effectiveBlockage(launch), excuse: launch.excuse
+    });
+    patchLaunch({ questionnaire: normalizeQuestionnaire(result, local) });
+    setLoading(false);
+  }
+
   async function generateLaunchAction() {
-    const local = getLocalLaunchProtocol(launch, launchStats);
+    const local = getLocalLaunchPlan(launch.task, effectiveBlockage(launch), launch.answers, launchStats);
     patchLaunch({ analysis: local, duration: local.duracion_recomendada });
     setLaunchStep("action");
     setLoading(true);
-    const result = await analyzeLaunchWithGemini({ ...launch, stats: launchStats, recent: launchHistory.slice(0, 5) });
-    if (result) {
-      const allowedDuration = [2, 5, 10, 25].includes(Number(result.duracion_recomendada)) ? Number(result.duracion_recomendada) : local.duracion_recomendada;
-      patchLaunch({ analysis: { ...local, ...result }, duration: allowedDuration });
-    }
+    const result = await analyzeLaunchWithGemini({
+      tarea: launch.task, resultado_deseado: launch.desiredResult, bloqueo: effectiveBlockage(launch), excusa: launch.excuse,
+      respuestas_cuestionario: launch.answers, preguntas: launch.questionnaire?.questions,
+      historial: { total: launchStats.total, completados: launchStats.completed, abandonados: launchStats.failed },
+      racha_abandonos: launchStats.failStreak, racha_completados: launchStats.completionStreak,
+      ultimos_5: launchHistory.slice(0, 5)
+    });
+    const plan = normalizeLaunchPlan(result, local);
+    patchLaunch({ analysis: plan, duration: plan.duracion_recomendada });
     setLoading(false);
   }
 
@@ -180,7 +196,8 @@ function App() {
       )}
       {currentModule === "launch10" && (
         <LaunchModule step={launchStep} launch={launch} loading={loading} onPatch={patchLaunch} onStart={startLaunch}
-          onGenerate={generateLaunchAction} onStep={setLaunchStep} onFinish={finishLaunch} onSave={saveLaunchResult} onMenu={goMenu} />
+          onQuestionnaire={generateLaunchQuestionnaire} onGenerate={generateLaunchAction} onStep={setLaunchStep}
+          onFinish={finishLaunch} onSave={saveLaunchResult} onMenu={goMenu} />
       )}
     </div></main>
   );
@@ -188,6 +205,42 @@ function App() {
 
 function effectiveBlockage(launch) {
   return launch.blockage === "Otro" ? launch.customBlockage.trim() || "Otro" : launch.blockage;
+}
+
+function normalizeQuestionnaire(result, fallback) {
+  if (!result || !Array.isArray(result.questions)) return fallback;
+  const questions = result.questions.slice(0, 6).map((item, index) => {
+    const type = item?.type === "single_choice" && Array.isArray(item.options) && item.options.length >= 2 ? "single_choice" : "text";
+    return {
+      id: String(item?.id || `question_${index + 1}`).replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 40),
+      question: String(item?.question || "").trim(),
+      type,
+      options: type === "single_choice" ? item.options.map(String).filter(Boolean).slice(0, 8) : []
+    };
+  }).filter((item) => item.question);
+  if (questions.length < 3) return fallback;
+  return { category: fallback.category, intro: String(result.intro || fallback.intro), questions };
+}
+
+function normalizeLaunchPlan(result, fallback) {
+  if (!result || !Array.isArray(result.pasos) || !result.pasos.length) return fallback;
+  const pasos = result.pasos.slice(0, 6).map((step, index) => ({
+    titulo: String(step?.titulo || `Paso ${index + 1}`),
+    descripcion: String(step?.descripcion || "Ejecuta este paso sin ampliar el alcance."),
+    duracion_minutos: Math.min(10, Math.max(1, Number(step?.duracion_minutos) || 5)),
+    resultado: String(step?.resultado || "Resultado visible completado.")
+  }));
+  const total = pasos.reduce((sum, step) => sum + step.duracion_minutos, 0);
+  if (total < 5 || total > 30) return fallback;
+  const allowedCategories = ["ads", "shopify", "estudio", "video", "producto", "negocio", "otro"];
+  const allowedTones = ["normal", "directo", "duro", "muy_duro"];
+  return {
+    ...fallback, ...result, pasos,
+    categoria_tarea: allowedCategories.includes(result.categoria_tarea) ? result.categoria_tarea : fallback.categoria_tarea,
+    duracion_recomendada: total,
+    no_hacer: Array.isArray(result.no_hacer) && result.no_hacer.length ? result.no_hacer.map(String).slice(0, 5) : fallback.no_hacer,
+    tono: allowedTones.includes(result.tono) ? result.tono : fallback.tono
+  };
 }
 
 function TopBar({ currentModule, antiStats, onMenu, onStats }) {
@@ -287,10 +340,11 @@ function AntiSummary({ protocol, stats, onStart, onMenu }) {
   </section>;
 }
 
-function LaunchModule({ step, launch, loading, onPatch, onStart, onGenerate, onStep, onFinish, onSave, onMenu }) {
+function LaunchModule({ step, launch, loading, onPatch, onStart, onQuestionnaire, onGenerate, onStep, onFinish, onSave, onMenu }) {
   if (step === "home") return <section className="screen home"><div className="stack center"><p className="eyebrow">Protocolo de inicio</p><h1>Arranque 10</h1><p className="subtitle">Convierte una tarea grande en una acción tan pequeña que no puedas rechazarla.</p><p className="launch-mantra">No tienes que tener ganas. Tienes que empezar pequeño.</p><div className="button-row center"><button className="primary-button large" onClick={onStart}><Rocket size={20} />Empezar arranque</button><button className="secondary-button" onClick={onMenu}>Menú</button></div></div></section>;
   if (step === "task") return <LaunchTask launch={launch} onPatch={onPatch} onNext={() => onStep("blockage")} />;
-  if (step === "blockage") return <LaunchBlockage launch={launch} onPatch={onPatch} onNext={onGenerate} />;
+  if (step === "blockage") return <LaunchBlockage launch={launch} onPatch={onPatch} onNext={onQuestionnaire} />;
+  if (step === "questionnaire") return <LaunchQuestionnaire launch={launch} loading={loading} onPatch={onPatch} onGenerate={onGenerate} />;
   if (step === "action") return <LaunchAction launch={launch} loading={loading} onPatch={onPatch} onStart={() => onStep("timer")} onRegenerate={onGenerate} onMenu={onMenu} />;
   if (step === "timer") return <LaunchTimer launch={launch} onComplete={() => onFinish(true)} onAbandon={() => onFinish(false)} />;
   return <LaunchSummary launch={launch} onPatch={onPatch} onSave={onSave} onStart={onStart} onMenu={onMenu} />;
@@ -310,32 +364,68 @@ function LaunchBlockage({ launch, onPatch, onNext }) {
     <div className="option-grid">{launchBlockages.map((item) => <button key={item} className={`option ${launch.blockage === item ? "selected" : ""}`} onClick={() => onPatch({ blockage: item })}>{item}</button>)}</div>
     {launch.blockage === "Otro" && <label className="field"><span>Describe el bloqueo</span><input value={launch.customBlockage} onChange={(e) => onPatch({ customBlockage: e.target.value })} /></label>}
     <label className="field"><span>¿Qué excusa te estás contando? <small>Opcional</small></span><textarea value={launch.excuse} onChange={(e) => onPatch({ excuse: e.target.value })} placeholder="Ejemplo: luego lo hago, necesito inspirarme..." /></label>
-    <button className="primary-button" disabled={!valid} onClick={onNext}>Generar acción mínima</button>
+    <button className="primary-button" disabled={!valid} onClick={onNext}>Crear cuestionario personalizado</button>
+  </section>;
+}
+
+function LaunchQuestionnaire({ launch, loading, onPatch, onGenerate }) {
+  const questionnaire = launch.questionnaire;
+  const questions = questionnaire?.questions || [];
+  const valid = questions.length >= 3 && questions.every((item) => String(launch.answers?.[item.id] || "").trim());
+  function setAnswer(id, value) {
+    onPatch({ answers: { ...launch.answers, [id]: value } });
+  }
+  return <section className="screen"><StepHeader icon={<Target />} title="Cuestionario inteligente" text={questionnaire?.intro || "Cerrando el alcance de la tarea."} />
+    {loading && <p className="recommendation">Gemini está personalizando las preguntas. Puedes responder ya al cuestionario local.</p>}
+    <div className="questionnaire">{questions.map((item, index) => <div className="question-card" key={item.id}>
+      <p className="eyebrow">Pregunta {index + 1}</p><h2>{item.question}</h2>
+      {item.type === "single_choice" ? <div className="choice-list">{item.options.map((option) => <button key={option} className={`option ${launch.answers?.[item.id] === option ? "selected" : ""}`} onClick={() => setAnswer(item.id, option)}>{option}</button>)}</div> : <input value={launch.answers?.[item.id] || ""} onChange={(e) => setAnswer(item.id, e.target.value)} placeholder="Respuesta concreta" />}
+    </div>)}</div>
+    <button className="primary-button large" disabled={!valid || loading} onClick={onGenerate}>Generar plan de ejecución</button>
   </section>;
 }
 
 function LaunchAction({ launch, loading, onPatch, onStart, onRegenerate, onMenu }) {
   const analysis = launch.analysis;
+  const total = analysis?.pasos?.reduce((sum, step) => sum + Number(step.duracion_minutos || 0), 0) || analysis?.duracion_recomendada || 10;
   return <section className="screen"><StepHeader icon={<Rocket />} title="Acción mínima generada" text="No termines la tarea. Rompe el inicio." />
     <div className={`analysis-card tone-${analysis?.tono || "directo"}`}><p className="eyebrow">{loading ? "Gemini está afinando la respuesta…" : "Protocolo listo"}</p>
-      <AnalysisItem label="Diagnóstico" value={analysis?.diagnostico} /><AnalysisItem label="Excusa traducida" value={analysis?.excusa_traducida} />
+      <AnalysisItem label="Diagnóstico" value={analysis?.diagnostico} />
       <div className="minimal-action"><span>Acción mínima exacta</span><h2>{analysis?.accion_minima}</h2></div>
-      <div className="analysis-grid"><AnalysisItem label="Duración recomendada" value={`${analysis?.duracion_recomendada || 10} minutos`} /><AnalysisItem label="Primer movimiento" value={analysis?.primer_movimiento} /></div>
+      <div className="execution-plan"><div className="plan-heading"><div><p className="eyebrow">Plan de ejecución</p><h2>{analysis?.pasos?.length || 0} pasos concretos</h2></div><strong>{total} min</strong></div>
+        {analysis?.pasos?.map((step, index) => <div className="plan-step" key={`${step.titulo}-${index}`}><span className="step-number">{index + 1}</span><div><div className="step-title"><h3>{step.titulo}</h3><b>{step.duracion_minutos} min</b></div><p>{step.descripcion}</p><small>Resultado: {step.resultado}</small></div></div>)}
+      </div>
+      <div className="analysis-grid"><AnalysisItem label="Duración total aproximada" value={`${total} minutos`} /><AnalysisItem label="Primer movimiento" value={analysis?.primer_movimiento} /></div>
+      <div className="dont-list"><p className="eyebrow">Qué no hacer ahora</p><ul>{analysis?.no_hacer?.map((item) => <li key={item}>{item}</li>)}</ul></div>
       <blockquote>{analysis?.mensaje_directo}</blockquote>
     </div>
-    <div className="duration-picker"><span>Duración</span>{[2, 5, 10, 25].map((duration) => <button key={duration} className={`duration-chip ${launch.duration === duration ? "selected" : ""}`} onClick={() => onPatch({ duration })}>{duration} min</button>)}</div>
-    <div className="button-row"><button className="primary-button large" disabled={loading} onClick={onStart}><Play size={20} />Empiezo ahora</button><button className="secondary-button" disabled={loading} onClick={onRegenerate}><RotateCcw size={17} />Regenerar acción</button><button className="ghost-button" onClick={onMenu}>Menú</button></div>
+    <div className="button-row"><button className="primary-button large" disabled={loading} onClick={onStart}><Play size={20} />Empezar paso 1</button><button className="secondary-button" disabled={loading} onClick={onRegenerate}><RotateCcw size={17} />Regenerar</button><button className="ghost-button" onClick={onMenu}>Menú</button></div>
   </section>;
 }
 
 function LaunchTimer({ launch, onComplete, onAbandon }) {
-  return <section className="screen timer-screen"><div className="stack center"><p className="eyebrow">Ejecutando acción mínima</p><h1>{launch.analysis?.accion_minima}</h1><p className="subtitle">Solo cumple este bloque. No pienses en toda la tarea.</p><Countdown minutes={launch.duration} running /><div className="button-row center"><button className="primary-button large success" onClick={onComplete}><CheckCircle2 size={20} />He terminado</button><button className="danger-button" onClick={onAbandon}>Abandonar</button></div></div></section>;
+  const steps = launch.analysis?.pasos || [];
+  const [current, setCurrent] = useState(0);
+  const [completed, setCompleted] = useState([]);
+  const step = steps[current];
+  function advance(skipped = false) {
+    setCompleted((items) => [...items, { index: current, skipped }]);
+    if (current >= steps.length - 1) onComplete();
+    else setCurrent((value) => value + 1);
+  }
+  if (!step) return <section className="screen"><p>No hay pasos disponibles.</p><button className="primary-button" onClick={onComplete}>Finalizar</button></section>;
+  return <section className="screen timer-screen"><div className="step-progress"><span>Paso {current + 1} de {steps.length}</span><div><i style={{ width: `${((current + 1) / steps.length) * 100}%` }} /></div></div>
+    <div className="step-runner"><span className="step-number large">{current + 1}</span><p className="eyebrow">Paso actual</p><h1>{step.titulo}</h1><p className="subtitle">{step.descripcion}</p>
+      <div className="expected-result"><span>Resultado esperado</span><strong>{step.resultado}</strong></div><Countdown key={current} minutes={step.duracion_minutos} running />
+      <div className="button-row center"><button className="primary-button large success" onClick={() => advance(false)}><CheckCircle2 size={20} />Paso completado</button><button className="secondary-button" onClick={() => advance(true)}>Saltar paso</button><button className="danger-button" onClick={onAbandon}>Abandonar</button></div>
+      {completed.length > 0 && <p className="timer-note">{completed.filter((item) => !item.skipped).length} pasos completados · {completed.filter((item) => item.skipped).length} saltados</p>}
+    </div></section>;
 }
 
 function LaunchSummary({ launch, onPatch, onSave, onStart, onMenu }) {
   if (!launch.completed) return <section className="screen"><StepHeader icon={<XCircle />} title="Arranque abandonado" text="Queda registrado. El patrón se rompe ejecutando pequeño." /><div className="button-row"><button className="primary-button" onClick={onStart}>Hacer otro arranque</button><button className="secondary-button" onClick={onMenu}>Menú</button></div></section>;
   return <section className="screen"><StepHeader icon={<CheckCircle2 />} title="Arranque completado" text="No necesitabas ganas. Necesitabas empezar." />
-    <div className="summary-list"><SummaryRow label="Tarea" value={launch.task} /><SummaryRow label="Bloqueo" value={launch.blockage} /><SummaryRow label="Excusa" value={launch.excuse} /><SummaryRow label="Acción mínima" value={launch.analysis?.accion_minima} /><SummaryRow label="Duración" value={`${launch.duration} minutos`} /></div>
+    <div className="summary-list"><SummaryRow label="Tarea" value={launch.task} /><SummaryRow label="Bloqueo" value={launch.blockage} /><SummaryRow label="Excusa" value={launch.excuse} /><SummaryRow label="Categoría" value={launch.analysis?.categoria_tarea} /><SummaryRow label="Acción mínima" value={launch.analysis?.accion_minima} /><SummaryRow label="Plan completado" value={`${launch.analysis?.pasos?.length || 0} pasos · ${launch.duration} minutos aprox.`} /></div>
     <label className="field"><span>¿Qué hiciste realmente? <small>Opcional</small></span><textarea value={launch.actualResult} onChange={(e) => onPatch({ actualResult: e.target.value })} /></label>
     <div className="button-row"><button className="primary-button" onClick={onSave}>Guardar</button><button className="secondary-button" onClick={onStart}>Hacer otro arranque</button><button className="ghost-button" onClick={onMenu}>Menú</button></div>
   </section>;
