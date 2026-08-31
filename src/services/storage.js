@@ -1,198 +1,181 @@
-const HISTORY_KEY = "sistemaAnticaidaHistory";
-const ACTIVE_KEY = "sistemaAnticaidaActive";
+const ANTIFALL_HISTORY_KEY = "sistemaAnticaidaHistory";
+const ANTIFALL_ACTIVE_KEY = "sistemaAnticaidaActive";
+const LAUNCH_HISTORY_KEY = "modoEjecucionLaunchHistory";
+const COUNTERS_KEY = "modoEjecucionCounters";
 
-export function readHistory() {
+function readArray(key) {
   try {
-    const parsed = JSON.parse(localStorage.getItem(HISTORY_KEY) || "[]");
-    return Array.isArray(parsed) ? parsed : [];
+    const value = JSON.parse(localStorage.getItem(key) || "[]");
+    return Array.isArray(value) ? value : [];
   } catch {
     return [];
   }
 }
 
-function writeHistory(history) {
-  localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
+function writeArray(key, value) {
+  localStorage.setItem(key, JSON.stringify(value));
 }
 
-export function saveActiveProtocol(protocol) {
-  localStorage.setItem(ACTIVE_KEY, JSON.stringify(protocol));
-}
+export const readHistory = () => readArray(ANTIFALL_HISTORY_KEY);
+export const readLaunchHistory = () => readArray(LAUNCH_HISTORY_KEY);
+export const saveActiveProtocol = (protocol) => localStorage.setItem(ANTIFALL_ACTIVE_KEY, JSON.stringify(protocol));
+export const clearActiveProtocol = () => localStorage.removeItem(ANTIFALL_ACTIVE_KEY);
 
 export function updateActiveProtocol(values) {
-  const active = JSON.parse(localStorage.getItem(ACTIVE_KEY) || "null");
-  if (!active) return;
-  localStorage.setItem(ACTIVE_KEY, JSON.stringify({ ...active, ...values }));
+  try {
+    const active = JSON.parse(localStorage.getItem(ANTIFALL_ACTIVE_KEY) || "null");
+    if (active) saveActiveProtocol({ ...active, ...values });
+  } catch {
+    clearActiveProtocol();
+  }
 }
 
-export function clearActiveProtocol() {
-  localStorage.removeItem(ACTIVE_KEY);
+function readCounters() {
+  try {
+    return { antifallStarted: 0, launchStarted: 0, ...JSON.parse(localStorage.getItem(COUNTERS_KEY) || "{}") };
+  } catch {
+    return { antifallStarted: 0, launchStarted: 0 };
+  }
+}
+
+export function recordProtocolStarted(module) {
+  const counters = readCounters();
+  const key = module === "launch10" ? "launchStarted" : "antifallStarted";
+  counters[key] += 1;
+  localStorage.setItem(COUNTERS_KEY, JSON.stringify(counters));
 }
 
 export function saveProtocol(protocol) {
-  const history = readHistory();
-  const emotion = protocol.emotion === "Otro" ? protocol.customEmotion : protocol.emotion;
-  const shield = protocol.shield === "Otro ajuste personalizado." ? protocol.customShield : protocol.shield;
-  const previousProblemStats = getStats(history, protocol.problemId || protocol.problem);
-  const completed = Boolean(protocol.completed);
-  const failStreak = completed ? 0 : previousProblemStats.failStreak + 1;
-  const completionStreak = completed ? previousProblemStats.completionStreak + 1 : 0;
-
   const record = {
-    id: crypto.randomUUID(),
-    date: protocol.startedAt || new Date().toISOString(),
-    endedAt: protocol.endedAt || new Date().toISOString(),
-    problemId: protocol.problemId || "",
-    problem: protocol.problem,
-    details: protocol.details,
-    reset: protocol.reset,
-    emotion,
-    avoidedTask: protocol.avoidedTask,
-    consequence: protocol.consequence,
-    minimalAction: protocol.action,
-    completed,
-    shield,
-    failStreak,
-    completionStreak,
-    analysis: protocol.analysis
+    id: crypto.randomUUID(), module: "antifall",
+    date: protocol.startedAt || new Date().toISOString(), endedAt: protocol.endedAt || new Date().toISOString(),
+    problemId: protocol.problemId || "", problem: protocol.problem || "", details: protocol.details || "",
+    reset: protocol.reset || "", emotion: protocol.emotion === "Otro" ? protocol.customEmotion : protocol.emotion,
+    avoidedTask: protocol.avoidedTask || "", consequence: protocol.consequence || "",
+    minimalAction: protocol.action || "", completed: Boolean(protocol.completed),
+    shield: protocol.shield === "Otro ajuste personalizado." ? protocol.customShield : protocol.shield,
+    analysis: protocol.analysis || null
   };
-
-  writeHistory([record, ...history]);
+  writeArray(ANTIFALL_HISTORY_KEY, [record, ...readHistory()]);
   clearActiveProtocol();
   return record;
 }
 
-export function markActiveFailureIfNeeded() {
-  const active = JSON.parse(localStorage.getItem(ACTIVE_KEY) || "null");
-  if (!active?.abandonedByClose || active.actionCompleted || (!active.problemId && !active.problem)) return false;
-  saveProtocol({ ...active, completed: false, endedAt: new Date().toISOString() });
-  return true;
+export function saveLaunch(launch) {
+  const record = {
+    ...launch, id: crypto.randomUUID(), module: "launch10",
+    date: launch.startedAt || new Date().toISOString(), endedAt: launch.endedAt || new Date().toISOString(),
+    completed: Boolean(launch.completed)
+  };
+  writeArray(LAUNCH_HISTORY_KEY, [record, ...readLaunchHistory()]);
+  return record;
 }
 
-function mostRepeated(items) {
-  const counts = new Map();
-  for (const item of items.filter(Boolean)) {
-    counts.set(item, (counts.get(item) || 0) + 1);
+export function updateLatestLaunch(values) {
+  const history = readLaunchHistory();
+  if (history.length) writeArray(LAUNCH_HISTORY_KEY, [{ ...history[0], ...values }, ...history.slice(1)]);
+}
+
+export function markActiveFailureIfNeeded() {
+  try {
+    const active = JSON.parse(localStorage.getItem(ANTIFALL_ACTIVE_KEY) || "null");
+    if (!active?.abandonedByClose || active.actionCompleted || !active.problemId) return false;
+    saveProtocol({ ...active, completed: false });
+    return true;
+  } catch {
+    clearActiveProtocol();
+    return false;
   }
+}
+
+function bestStreak(history) {
+  let best = 0, running = 0;
+  for (const item of [...history].reverse()) {
+    running = item.completed ? running + 1 : 0;
+    best = Math.max(best, running);
+  }
+  return best;
+}
+
+function leadingStreak(history, completed) {
+  let count = 0;
+  for (const item of history) {
+    if (Boolean(item.completed) !== completed) break;
+    count += 1;
+  }
+  return count;
+}
+
+function mostRepeated(values) {
+  const counts = new Map();
+  values.filter(Boolean).forEach((value) => counts.set(value, (counts.get(value) || 0) + 1));
   return [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || "";
 }
 
-export function getStats(history, problem = "") {
-  const scoped = problem
-    ? history.filter((item) => item.problemId === problem || item.problem === problem)
-    : history;
-  const total = scoped.length;
+export function getStats(history = readHistory(), problem = "") {
+  const scoped = problem ? history.filter((item) => item.problemId === problem || item.problem === problem) : history;
   const completed = scoped.filter((item) => item.completed).length;
-  const failed = total - completed;
-  let failStreak = 0;
-  let completionStreak = 0;
-  let bestCompletionStreak = 0;
-
-  for (const item of scoped) {
-    if (item.completed) {
-      if (failStreak === 0) completionStreak += 1;
-    } else if (completionStreak === 0) {
-      failStreak += 1;
-    }
-  }
-
-  let running = 0;
-  for (const item of [...scoped].reverse()) {
-    if (item.completed) {
-      running += 1;
-      bestCompletionStreak = Math.max(bestCompletionStreak, running);
-    } else {
-      running = 0;
-    }
-  }
-
   return {
-    total,
-    completed,
-    failed,
-    failStreak,
-    completionStreak,
-    bestCompletionStreak,
+    total: problem ? scoped.length : Math.max(readCounters().antifallStarted, scoped.length), completed,
+    failed: scoped.length - completed, failStreak: leadingStreak(scoped, false),
+    completionStreak: leadingStreak(scoped, true), bestCompletionStreak: bestStreak(scoped),
     mostRepeatedProblem: mostRepeated(history.map((item) => item.problem)),
     mostRepeatedEmotion: mostRepeated(history.map((item) => item.emotion))
   };
 }
 
-export function buildGeminiPayload({ protocol, stats, previous, config }) {
+export function getLaunchStats(history = readLaunchHistory()) {
+  const completed = history.filter((item) => item.completed).length;
   return {
-    problema_id: protocol.problemId,
-    problema_seleccionado: protocol.problem,
-    contexto_del_problema: config.context,
-    texto_usuario: protocol.details,
-    emocion_seleccionada: protocol.emotion === "Otro" ? protocol.customEmotion : protocol.emotion,
-    que_estaba_evitando: protocol.avoidedTask,
-    historial_de_fallos: {
-      total_protocolos_mismo_problema: stats.total,
-      veces_completadas: stats.completed,
-      veces_abandonadas: stats.failed,
-      racha_fallos_seguidos: stats.failStreak,
-      racha_acciones_minimas_completadas: stats.completionStreak
-    },
-    racha_actual: stats.failStreak,
-    accion_minima_anterior: previous?.minimalAction || "",
-    blindaje_anterior: previous?.shield || "",
-    opciones_base_disponibles: {
-      emociones: config.defaultEmotionOptions,
-      resets_fisicos: config.resetOptions,
-      acciones_minimas: config.minimalActions,
-      blindajes: config.shieldOptions,
-      mensajes_duros_base: config.hardMessages
-    }
+    total: Math.max(readCounters().launchStarted, history.length), completed, failed: history.length - completed,
+    failStreak: leadingStreak(history, false), completionStreak: leadingStreak(history, true),
+    bestCompletionStreak: bestStreak(history), mostRepeatedBlockage: mostRepeated(history.map((item) => item.blockage)),
+    mostRepeatedExcuse: mostRepeated(history.map((item) => item.excuse))
   };
 }
 
-function detailTarget(protocol) {
-  const details = protocol.details?.trim();
-  const avoided = protocol.avoidedTask?.trim();
-  return details || avoided || "la tarea que estás evitando";
+export function getCombinedStats(antiHistory = readHistory(), launchHistory = readLaunchHistory()) {
+  const anti = getStats(antiHistory), launch = getLaunchStats(launchHistory);
+  const recent = [...antiHistory, ...launchHistory].sort((a, b) => new Date(b.date) - new Date(a.date)).slice(0, 5);
+  return { anti, launch, total: anti.total + launch.total, completed: anti.completed + launch.completed,
+    failed: anti.failed + launch.failed, bestStreak: Math.max(anti.bestCompletionStreak, launch.bestCompletionStreak),
+    failStreak: Math.max(anti.failStreak, launch.failStreak), recent };
 }
+
+export const buildGeminiPayload = ({ protocol, stats, config }) => ({ protocol, stats, contexto: config.context, opciones: config });
 
 export function fallbackAnalysis({ protocol, stats, firmness, config }) {
-  const target = detailTarget(protocol);
-  const action = protocol.action || localActionForProblem(protocol.problemId, target, config, stats);
+  const target = protocol.avoidedTask?.trim() || protocol.details?.trim() || "la tarea que estás evitando";
+  let action = config.minimalActions[0];
+  if (protocol.problemId === "procrastination") action = `Abre ${target} y trabaja solo 10 minutos en una parte concreta.`;
+  if (protocol.problemId === "lowEnergy") action = `Haz durante 10 minutos la parte más mecánica de: ${target}.`;
+  if (protocol.problemId === "doubts") action = `Define una prueba reversible sobre ${target} y ejecútala durante 10 minutos.`;
+  if (protocol.problemId === "abandonment") action = `Haz una reparación visible de 10 minutos sobre: ${target}.`;
+  if (protocol.problemId === "other") action = `Reduce ${target} a un solo paso visible y ejecútalo durante 10 minutos.`;
+  return { diagnostico: `El patrón intenta alejarte de ${target}. Ejecuta el primer paso visible.`, tono: firmness.tone,
+    reset_fisico: protocol.reset || config.resetOptions[0], accion_minima: action, mensaje_duro: firmness.message,
+    blindaje_recomendado: config.shieldOptions[0], pregunta_reflexion: `¿Qué excusa apareció justo antes de evitar ${target}?`, stats };
+}
 
-  return {
-    diagnostico:
-      `Estás usando ${config.context} para evitar: ${target}. No necesitas resolver todo ahora; necesitas abrir el punto concreto y ejecutar el primer movimiento.`,
-    tono: firmness.tone,
-    reset_fisico: protocol.reset || config.resetOptions[0],
-    accion_minima: personalizeAction(action, target),
-    mensaje_duro: `${firmness.message} Objetivo inmediato: ${target}.`,
-    blindaje_recomendado: config.shieldOptions[0],
-    pregunta_reflexion: `¿Qué excusa apareció justo antes de evitar ${target}?`
+export function getLocalLaunchProtocol(launch, stats = getLaunchStats()) {
+  const actions = {
+    "No sé por dónde empezar": ["Escribe el primer paso exacto y hazlo durante 10 minutos.", 10],
+    "Me parece demasiado grande": ["Reduce la tarea a una sola parte y trabaja 10 minutos.", 10],
+    "Me da pereza": ["Haz 5 minutos sin pensar en terminar.", 5],
+    "Me da miedo hacerlo mal": ["Haz una versión mala e incompleta durante 10 minutos.", 10],
+    "Estoy cansado": ["Haz una tarea mecánica de 5 minutos.", 5],
+    "Quiero hacer otra cosa": ["Primero cumple 10 minutos. Luego decides.", 10],
+    "Estoy buscando hacerlo perfecto": ["Haz la versión más simple y fea posible durante 10 minutos.", 10],
+    Otro: ["Haz el primer paso visible durante 10 minutos.", 10]
   };
-}
-
-function personalizeAction(action, target) {
-  if (!target || target === "la tarea que estás evitando") return action;
-  if (action.includes(target)) return action;
-  if (action.toLowerCase().includes("10 minutos")) {
-    return `Trabaja 10 minutos en esto: ${target}. Cambia una sola cosa concreta y no negocies.`;
-  }
-  return `${action} Aplicado ahora a: ${target}.`;
-}
-
-function localActionForProblem(problemId, target, config, stats) {
-  if (problemId === "procrastination") {
-    return `Abre exactamente esto: ${target}. Trabaja 10 minutos y cambia solo una parte concreta. Si es un anuncio, edita únicamente el primer hook.`;
-  }
-  if (problemId === "lowEnergy") {
-    return `Haz 10 minutos a ritmo bajo sobre esto: ${target}. Solo abre, ordena y completa el paso más fácil que siga moviendo el trabajo.`;
-  }
-  if (problemId === "doubts") {
-    return `Convierte la duda en una prueba: define una decisión reversible sobre ${target} y ejecuta el primer paso durante 10 minutos.`;
-  }
-  if (problemId === "abandonment") {
-    return `Haz una reparación de 10 minutos sobre esto: ${target}. No compenses todo; vuelve al sistema con una acción visible.`;
-  }
-  if (problemId === "other") {
-    return `Reduce el problema a una acción mínima: trabaja 10 minutos en ${target} sin cambiar de tarea.`;
-  }
-  return stats.failStreak >= 3
-    ? config.minimalActions[0]
-    : config.minimalActions[Math.min(1, config.minimalActions.length - 1)];
+  const [action, duration] = actions[launch.blockage] || actions.Otro;
+  return {
+    diagnostico: `La tarea “${launch.task}” sigue siendo demasiado abierta para empezar sin fricción.`,
+    excusa_traducida: launch.excuse?.trim() ? `“${launch.excuse.trim()}” es una forma de retrasar el primer movimiento.` : `“${launch.blockage}” está sustituyendo a la acción.`,
+    accion_minima: action, duracion_recomendada: duration,
+    primer_movimiento: `Abre ahora la herramienta necesaria para “${launch.task}” y deja solo eso visible.`,
+    mensaje_directo: stats.failStreak >= 2 ? "Has repetido el abandono. Reduce el alcance y ejecuta sin negociar otra vez." : "No tienes que terminar. Tienes que romper el inicio.",
+    siguiente_paso_si_termina: launch.desiredResult || "Define el siguiente paso visible.",
+    tono: stats.failStreak >= 3 ? "muy_duro" : stats.failStreak >= 2 ? "duro" : "directo"
+  };
 }
