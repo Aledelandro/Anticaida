@@ -1,0 +1,23 @@
+{
+  "name": "sistema-anticaida",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "npm run build && node server.js",
+    "build": "vite build",
+    "preview": "node server.js"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "^5.0.4",
+    "vite": "^7.1.5",
+    "typescript": "^5.9.2",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "express": "^5.1.0",
+    "dotenv": "^17.2.2",
+    "lucide-react": "^0.468.0"
+  },
+  "devDependencies": {}
+}
