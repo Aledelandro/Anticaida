@@ -45,8 +45,8 @@ export function recordProtocolStarted(module) {
   localStorage.setItem(COUNTERS_KEY, JSON.stringify(counters));
 }
 
-export function saveProtocol(protocol) {
-  const record = {
+export function createProtocolRecord(protocol) {
+  return {
     id: crypto.randomUUID(), module: "antifall",
     date: protocol.startedAt || new Date().toISOString(), endedAt: protocol.endedAt || new Date().toISOString(),
     problemId: protocol.problemId || "", problem: protocol.problem || "", details: protocol.details || "",
@@ -56,17 +56,25 @@ export function saveProtocol(protocol) {
     shield: protocol.shield === "Otro ajuste personalizado." ? protocol.customShield : protocol.shield,
     analysis: protocol.analysis || null
   };
+}
+
+export function saveProtocol(protocol) {
+  const record = createProtocolRecord(protocol);
   writeArray(ANTIFALL_HISTORY_KEY, [record, ...readHistory()]);
   clearActiveProtocol();
   return record;
 }
 
-export function saveLaunch(launch) {
-  const record = {
+export function createLaunchRecord(launch) {
+  return {
     ...launch, id: crypto.randomUUID(), module: "launch10",
     date: launch.startedAt || new Date().toISOString(), endedAt: launch.endedAt || new Date().toISOString(),
     completed: Boolean(launch.completed)
   };
+}
+
+export function saveLaunch(launch) {
+  const record = createLaunchRecord(launch);
   writeArray(LAUNCH_HISTORY_KEY, [record, ...readLaunchHistory()]);
   return record;
 }

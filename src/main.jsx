@@ -1,14 +1,18 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { Activity, AlertTriangle, BarChart3, CheckCircle2, ChevronLeft, Clock, Dumbbell, Flame, Lock, Play, Rocket, RotateCcw, Shield, Target, XCircle } from "lucide-react";
+import { Activity, AlertTriangle, BarChart3, CheckCircle2, ChevronLeft, Clock, Dumbbell, Flame, Lock, LogOut, Play, Rocket, RotateCcw, Shield, Target, User, XCircle } from "lucide-react";
 import "./styles.css";
 import { getProblemConfig, problemOptions } from "./problemConfigs";
 import { analyzeAntiFallWithGemini, analyzeLaunchWithGemini, generateLaunchQuestionnaireWithGemini } from "./services/gemini";
 import {
-  buildGeminiPayload, fallbackAnalysis, getCombinedStats, getLaunchStats, getLocalLaunchPlan, getLocalLaunchQuestionnaire, getStats,
+  buildGeminiPayload, createLaunchRecord, createProtocolRecord, fallbackAnalysis, getCombinedStats, getLaunchStats, getLocalLaunchPlan, getLocalLaunchQuestionnaire, getStats,
   markActiveFailureIfNeeded, readHistory, readLaunchHistory, recordProtocolStarted, saveActiveProtocol,
   saveLaunch, saveProtocol, updateActiveProtocol, updateLatestLaunch
 } from "./services/storage";
+import {
+  createProfile, getProfile, isSupabaseConfigured, loadUserContext, saveAntiFallSession,
+  saveLaunch10Session, saveOnboarding, supabase, updateLaunch10Session, updateProfile
+} from "./services/supabase";
 
 const initialProtocol = {
   problemId: "", problem: "", details: "", reset: "", emotion: "", customEmotion: "",
@@ -35,6 +39,10 @@ function toneFromFailures(failStreak, config) {
 }
 
 function App() {
+  const [session, setSession] = useState(null);
+  const [profile, setProfile] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [dataMessage, setDataMessage] = useState("");
   const [currentModule, setCurrentModule] = useState("menu");
   const [antiStep, setAntiStep] = useState("home");
   const [launchStep, setLaunchStep] = useState("home");
@@ -52,8 +60,50 @@ function App() {
   const firmness = toneFromFailures(problemStats.failStreak, config);
 
   useEffect(() => {
-    if (markActiveFailureIfNeeded()) setAntiHistory(readHistory());
+    if (!supabase) {
+      setAuthLoading(false);
+      return undefined;
+    }
+    supabase.auth.getSession().then(({ data }) => {
+      setSession(data.session);
+      setAuthLoading(false);
+    });
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      setSession(nextSession);
+      if (!nextSession) {
+        setProfile(null);
+        setCurrentModule("menu");
+      }
+    });
+    return () => listener.subscription.unsubscribe();
   }, []);
+
+  useEffect(() => {
+    if (!session?.user) return;
+    let active = true;
+    async function hydrate() {
+      try {
+        let nextProfile = await getProfile(session.user.id);
+        if (!nextProfile) nextProfile = await createProfile(session.user);
+        if (!active) return;
+        setProfile(nextProfile);
+        const context = await loadUserContext(session.user.id);
+        if (!active) return;
+        setAntiHistory(context.antiFallSessions.map(normalizeAntiSession));
+        setLaunchHistory(context.launch10Sessions.map(normalizeLaunchSession));
+        setDataMessage("");
+      } catch {
+        if (!active) return;
+        setDataMessage("Supabase no respondió. Se está usando el respaldo local.");
+        if (markActiveFailureIfNeeded()) setAntiHistory(readHistory());
+        setProfile((current) => current || {
+          id: session.user.id, email: session.user.email, onboarding_completed: false
+        });
+      }
+    }
+    hydrate();
+    return () => { active = false; };
+  }, [session?.user?.id]);
 
   useEffect(() => {
     const beforeUnload = (event) => {
@@ -85,15 +135,56 @@ function App() {
     if (module === "launch10") setLaunchStep("home");
   }
 
-  function goMenu() {
-    if (currentModule === "antifall" && !["home", "summary"].includes(antiStep) && protocol.startedAt) {
-      saveProtocol({ ...protocol, completed: false, endedAt: new Date().toISOString() });
+  async function persistAnti(finished) {
+    const record = createProtocolRecord(finished);
+    try {
+      const remote = await saveAntiFallSession(session.user.id, record);
+      const saved = { ...record, id: remote?.id || record.id };
+      setAntiHistory((history) => [saved, ...history]);
+      return saved;
+    } catch {
+      const saved = saveProtocol(finished);
       setAntiHistory(readHistory());
+      setDataMessage("No se pudo guardar en Supabase. La sesión quedó respaldada localmente.");
+      return saved;
+    }
+  }
+
+  async function persistLaunch(finished) {
+    const record = createLaunchRecord(finished);
+    try {
+      const remote = await saveLaunch10Session(session.user.id, record);
+      const saved = { ...record, id: remote?.id || record.id, remoteSessionId: remote?.id };
+      setLaunchHistory((history) => [saved, ...history]);
+      return saved;
+    } catch {
+      const saved = saveLaunch(finished);
+      setLaunchHistory(readLaunchHistory());
+      setDataMessage("No se pudo guardar en Supabase. La sesión quedó respaldada localmente.");
+      return saved;
+    }
+  }
+
+  async function getGeminiContext() {
+    try {
+      return await loadUserContext(session.user.id);
+    } catch {
+      return {
+        profile,
+        userMemory: [],
+        antiFallSessions: antiHistory.slice(0, 5),
+        launch10Sessions: launchHistory.slice(0, 5)
+      };
+    }
+  }
+
+  async function goMenu() {
+    if (currentModule === "antifall" && !["home", "summary"].includes(antiStep) && protocol.startedAt) {
+      await persistAnti({ ...protocol, completed: false, endedAt: new Date().toISOString() });
       setProtocol(initialProtocol);
     }
     if (currentModule === "launch10" && !["home", "summary"].includes(launchStep) && launch.startedAt && !launch.saved) {
-      saveLaunch({ ...launch, blockage: effectiveBlockage(launch), completed: false });
-      setLaunchHistory(readLaunchHistory());
+      await persistLaunch({ ...launch, blockage: effectiveBlockage(launch), completed: false });
       setLaunch(initialLaunch);
     }
     setCurrentModule("menu");
@@ -112,7 +203,8 @@ function App() {
     patchProtocol({ analysis: local, action: local.accion_minima });
     setAntiStep("reset");
     setLoading(true);
-    const result = await analyzeAntiFallWithGemini(buildGeminiPayload({ protocol, stats: problemStats, config }));
+    const userContext = await getGeminiContext();
+    const result = await analyzeAntiFallWithGemini({ ...buildGeminiPayload({ protocol, stats: problemStats, config }), userContext });
     if (result) patchProtocol({ analysis: { ...local, ...result }, action: result.accion_minima || local.accion_minima });
     setLoading(false);
   }
@@ -122,16 +214,16 @@ function App() {
     patchProtocol({ analysis: local, action: local.accion_minima });
     setAntiStep("action");
     setLoading(true);
-    const result = await analyzeAntiFallWithGemini(buildGeminiPayload({ protocol, stats: problemStats, config }));
+    const userContext = await getGeminiContext();
+    const result = await analyzeAntiFallWithGemini({ ...buildGeminiPayload({ protocol, stats: problemStats, config }), userContext });
     if (result) patchProtocol({ analysis: { ...local, ...result }, action: result.accion_minima || local.accion_minima });
     setLoading(false);
   }
 
-  function finishAntiFall() {
+  async function finishAntiFall() {
     const finished = { ...protocol, completed: true, actionCompleted: true, endedAt: new Date().toISOString() };
-    saveProtocol(finished);
     setProtocol(finished);
-    setAntiHistory(readHistory());
+    await persistAnti(finished);
     setAntiStep("summary");
   }
 
@@ -146,8 +238,10 @@ function App() {
     patchLaunch({ questionnaire: local, answers: {} });
     setLaunchStep("questionnaire");
     setLoading(true);
+    const userContext = await getGeminiContext();
     const result = await generateLaunchQuestionnaireWithGemini({
-      task: launch.task, desiredResult: launch.desiredResult, blockage: effectiveBlockage(launch), excuse: launch.excuse
+      task: launch.task, desiredResult: launch.desiredResult, blockage: effectiveBlockage(launch), excuse: launch.excuse,
+      userContext
     });
     patchLaunch({ questionnaire: normalizeQuestionnaire(result, local) });
     setLoading(false);
@@ -158,36 +252,51 @@ function App() {
     patchLaunch({ analysis: local, duration: local.duracion_recomendada });
     setLaunchStep("action");
     setLoading(true);
+    const userContext = await getGeminiContext();
     const result = await analyzeLaunchWithGemini({
       tarea: launch.task, resultado_deseado: launch.desiredResult, bloqueo: effectiveBlockage(launch), excusa: launch.excuse,
       respuestas_cuestionario: launch.answers, preguntas: launch.questionnaire?.questions,
       historial: { total: launchStats.total, completados: launchStats.completed, abandonados: launchStats.failed },
       racha_abandonos: launchStats.failStreak, racha_completados: launchStats.completionStreak,
-      ultimos_5: launchHistory.slice(0, 5)
+      ultimos_5: launchHistory.slice(0, 5), userContext
     });
     const plan = normalizeLaunchPlan(result, local);
     patchLaunch({ analysis: plan, duration: plan.duracion_recomendada });
     setLoading(false);
   }
 
-  function finishLaunch(completed) {
+  async function finishLaunch(completed) {
     const finished = { ...launch, blockage: effectiveBlockage(launch), completed, saved: true, endedAt: new Date().toISOString() };
-    saveLaunch(finished);
-    setLaunch(finished);
-    setLaunchHistory(readLaunchHistory());
+    const saved = await persistLaunch(finished);
+    setLaunch({ ...finished, remoteSessionId: saved.remoteSessionId });
     setLaunchStep("summary");
   }
 
-  function saveLaunchResult() {
-    updateLatestLaunch({ actualResult: launch.actualResult });
+  async function saveLaunchResult() {
+    try {
+      if (!launch.remoteSessionId) throw new Error("No remote session");
+      await updateLaunch10Session(launch.remoteSessionId, { actual_result: launch.actualResult });
+      setLaunchHistory((history) => history.map((item, index) => index ? item : { ...item, actualResult: launch.actualResult }));
+    } catch {
+      updateLatestLaunch({ actualResult: launch.actualResult });
+      setLaunchHistory(readLaunchHistory());
+      setDataMessage("No se pudo actualizar Supabase. El resultado quedó respaldado localmente.");
+    }
     patchLaunch({ saved: true });
-    setLaunchHistory(readLaunchHistory());
   }
+
+  if (authLoading) return <AppLoading text="Comprobando sesión…" />;
+  if (!isSupabaseConfigured) return <AppLoading text="Faltan VITE_SUPABASE_URL y VITE_SUPABASE_ANON_KEY." />;
+  if (!session) return <AuthScreen />;
+  if (!profile) return <AppLoading text="Cargando tu perfil…" />;
+  if (!profile.onboarding_completed) return <OnboardingScreen user={session.user} profile={profile} onComplete={setProfile} />;
 
   return (
     <main className="app"><div className="shell">
-      {currentModule !== "menu" && <TopBar currentModule={currentModule} antiStats={antiStats} onMenu={goMenu} onStats={() => { goMenu(); setCurrentModule("stats"); }} />}
-      {currentModule === "menu" && <MainMenu onOpen={openModule} />}
+      {dataMessage && <div className="data-message">{dataMessage}</div>}
+      {currentModule !== "menu" && <TopBar currentModule={currentModule} antiStats={antiStats} onMenu={goMenu} onStats={async () => { await goMenu(); setCurrentModule("stats"); }} />}
+      {currentModule === "menu" && <MainMenu onOpen={openModule} onProfile={() => setCurrentModule("profile")} />}
+      {currentModule === "profile" && <ProfileScreen user={session.user} profile={profile} onProfile={setProfile} onMenu={goMenu} />}
       {currentModule === "stats" && <StatsScreen combined={combinedStats} onMenu={goMenu} />}
       {currentModule === "antifall" && (
         <AntiFallModule step={antiStep} protocol={protocol} stats={antiStats} problemStats={problemStats} firmness={firmness}
@@ -201,6 +310,148 @@ function App() {
       )}
     </div></main>
   );
+}
+
+function normalizeAntiSession(row) {
+  return {
+    id: row.id, module: "antifall", date: row.started_at || row.created_at,
+    endedAt: row.ended_at, problemId: row.problem_id || "", problem: row.problem || "",
+    details: row.details || "", reset: row.reset_action || "", emotion: row.emotion || "",
+    avoidedTask: row.avoided_task || "", consequence: row.consequence || "",
+    minimalAction: row.minimal_action || "", completed: Boolean(row.completed),
+    shield: row.shield || "", analysis: row.analysis || null
+  };
+}
+
+function normalizeLaunchSession(row) {
+  return {
+    id: row.id, remoteSessionId: row.id, module: "launch10", date: row.started_at || row.created_at,
+    endedAt: row.ended_at, task: row.task || "", desiredResult: row.desired_result || "",
+    blockage: row.blockage || "", excuse: row.excuse || "", questionnaire: row.questionnaire,
+    answers: row.answers || {}, analysis: row.plan, duration: row.duration || 10,
+    actualResult: row.actual_result || "", completed: Boolean(row.completed), saved: true
+  };
+}
+
+function AppLoading({ text }) {
+  return <main className="app"><div className="shell auth-shell"><div className="auth-card center"><Target size={38} /><h1>Modo Ejecución</h1><p className="subtitle">{text}</p></div></div></main>;
+}
+
+function AuthScreen() {
+  const [mode, setMode] = useState("login");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+
+  async function submit(event) {
+    event.preventDefault();
+    setBusy(true);
+    setMessage("");
+    try {
+      if (mode === "login") {
+        const { error } = await supabase.auth.signInWithPassword({ email, password });
+        if (error) throw error;
+      } else {
+        const { data, error } = await supabase.auth.signUp({ email, password });
+        if (error) throw error;
+        if (data.user) {
+          try { await createProfile(data.user); } catch { /* Puede existir un trigger de creación de perfil. */ }
+        }
+        if (!data.session) setMessage("Cuenta creada. Revisa tu email para confirmar el acceso.");
+      }
+    } catch (error) {
+      setMessage(error?.message || "No se pudo completar el acceso.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return <main className="app"><div className="shell auth-shell"><section className="auth-card">
+    <div className="auth-heading"><div className="step-icon"><Target /></div><p className="eyebrow">Sistema personal de ejecución</p><h1>{mode === "login" ? "Entrar" : "Crear cuenta"}</h1><p className="subtitle">Tu progreso y tus sesiones quedarán sincronizados.</p></div>
+    <div className="auth-tabs"><button className={mode === "login" ? "selected" : ""} onClick={() => { setMode("login"); setMessage(""); }}>Login</button><button className={mode === "register" ? "selected" : ""} onClick={() => { setMode("register"); setMessage(""); }}>Registro</button></div>
+    <form className="auth-form" onSubmit={submit}>
+      <label className="field"><span>Email</span><input type="email" autoComplete="email" required value={email} onChange={(e) => setEmail(e.target.value)} placeholder="tu@email.com" /></label>
+      <label className="field"><span>Contraseña</span><input type="password" autoComplete={mode === "login" ? "current-password" : "new-password"} minLength={6} required value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Mínimo 6 caracteres" /></label>
+      {message && <p className="form-message">{message}</p>}
+      <button className="primary-button large" disabled={busy}>{busy ? "Procesando…" : mode === "login" ? "Entrar" : "Crear cuenta"}</button>
+    </form>
+  </section></div></main>;
+}
+
+const onboardingQuestions = [
+  { id: "name", title: "¿Cómo quieres que te llamemos?", type: "text", placeholder: "Tu nombre" },
+  { id: "main_goal", title: "¿Cuál es tu objetivo principal ahora?", type: "textarea", placeholder: "El resultado que quieres conseguir" },
+  { id: "main_obstacle", title: "¿Qué patrón te frena más?", type: "textarea", placeholder: "Procrastinación, dudas, abandono…" },
+  { id: "motivation", title: "¿Por qué es importante cambiarlo?", type: "textarea", placeholder: "La razón que no quieres olvidar" },
+  { id: "preferred_tone", title: "¿Qué tono prefieres cuando te bloqueas?", type: "choice", options: [["normal", "Normal"], ["directo", "Directo"], ["duro", "Duro"], ["muy_duro", "Muy duro"]] }
+];
+
+function OnboardingScreen({ user, profile, onComplete }) {
+  const [step, setStep] = useState(0);
+  const [answers, setAnswers] = useState({ name: profile.name || "", preferred_tone: profile.preferred_tone || "directo" });
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const question = onboardingQuestions[step];
+  const value = String(answers[question.id] || "").trim();
+
+  async function next() {
+    if (step < onboardingQuestions.length - 1) {
+      setStep((current) => current + 1);
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      const nextProfile = await saveOnboarding(user.id, answers);
+      onComplete(nextProfile);
+    } catch (saveError) {
+      setError(saveError?.message || "No se pudo guardar el onboarding.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return <main className="app"><div className="shell onboarding-shell"><section className="screen onboarding-card">
+    <div className="onboarding-progress"><span>Configuración inicial · {step + 1} de {onboardingQuestions.length}</span><div><i style={{ width: `${((step + 1) / onboardingQuestions.length) * 100}%` }} /></div></div>
+    <div className="step-header"><div className="step-icon"><User /></div><div><p className="eyebrow">Personaliza tu sistema</p><h1>{question.title}</h1></div></div>
+    {question.type === "choice" ? <div className="option-grid">{question.options.map(([optionValue, label]) => <button key={optionValue} className={`option ${answers[question.id] === optionValue ? "selected" : ""}`} onClick={() => setAnswers({ ...answers, [question.id]: optionValue })}>{label}</button>)}</div> : <label className="field"><span>Tu respuesta</span>{question.type === "textarea" ? <textarea autoFocus value={answers[question.id] || ""} onChange={(e) => setAnswers({ ...answers, [question.id]: e.target.value })} placeholder={question.placeholder} /> : <input autoFocus value={answers[question.id] || ""} onChange={(e) => setAnswers({ ...answers, [question.id]: e.target.value })} placeholder={question.placeholder} />}</label>}
+    {error && <p className="form-message">{error}</p>}
+    <div className="button-row"><button className="secondary-button" disabled={step === 0 || busy} onClick={() => setStep((current) => current - 1)}><ChevronLeft size={18} />Atrás</button><button className="primary-button" disabled={!value || busy} onClick={next}>{busy ? "Guardando…" : step === onboardingQuestions.length - 1 ? "Terminar" : "Siguiente"}</button></div>
+  </section></div></main>;
+}
+
+function ProfileScreen({ user, profile, onProfile, onMenu }) {
+  const [name, setName] = useState(profile.name || "");
+  const [tone, setTone] = useState(profile.preferred_tone || "directo");
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+
+  async function save(event) {
+    event.preventDefault();
+    setBusy(true);
+    setMessage("");
+    try {
+      const next = await updateProfile(user.id, { name: name.trim(), preferred_tone: tone });
+      onProfile(next);
+      setMessage("Perfil actualizado.");
+    } catch (error) {
+      setMessage(error?.message || "No se pudo actualizar el perfil.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return <section className="screen profile-screen"><StepHeader icon={<User />} title="Perfil" text="Ajusta cómo quieres usar Modo Ejecución." />
+    <form className="profile-card" onSubmit={save}>
+      <label className="field"><span>Nombre</span><input value={name} onChange={(e) => setName(e.target.value)} /></label>
+      <label className="field"><span>Email</span><input value={user.email || ""} readOnly /></label>
+      <label className="field"><span>Tono preferido</span><select value={tone} onChange={(e) => setTone(e.target.value)}><option value="normal">Normal</option><option value="directo">Directo</option><option value="duro">Duro</option><option value="muy_duro">Muy duro</option></select></label>
+      {message && <p className="form-message">{message}</p>}
+      <div className="button-row"><button className="primary-button" disabled={busy || !name.trim()}>{busy ? "Guardando…" : "Guardar cambios"}</button><button className="secondary-button" type="button" onClick={onMenu}>Volver al menú</button></div>
+    </form>
+    <button className="danger-button logout-button" onClick={() => supabase.auth.signOut()}><LogOut size={18} />Cerrar sesión</button>
+  </section>;
 }
 
 function effectiveBlockage(launch) {
@@ -254,7 +505,7 @@ function TopBar({ currentModule, antiStats, onMenu, onStats }) {
   </header>;
 }
 
-function MainMenu({ onOpen }) {
+function MainMenu({ onOpen, onProfile }) {
   const cards = [
     ["Sistema Anticaída", "Cuando estás a punto de caer, jugar, procrastinar o abandonar.", <Shield />, "antifall", "Entrar"],
     ["Arranque 10", "Cuando sabes lo que tienes que hacer, pero no consigues empezar.", <Rocket />, "launch10", "Entrar"],
@@ -264,7 +515,7 @@ function MainMenu({ onOpen }) {
     ["Estadísticas", "Tu identidad medida en datos.", <BarChart3 />, "stats", "Ver estadísticas"]
   ];
   return <section className="screen main-menu">
-    <div className="menu-heading"><p className="eyebrow">Sistema personal de ejecución</p><h1>MODO EJECUCIÓN</h1><p className="subtitle">No esperes motivación. Entra en movimiento.</p></div>
+    <div className="menu-heading"><div className="menu-heading-row"><div><p className="eyebrow">Sistema personal de ejecución</p><h1>MODO EJECUCIÓN</h1></div><button className="secondary-button profile-button" onClick={onProfile}><User size={18} />Perfil</button></div><p className="subtitle">No esperes motivación. Entra en movimiento.</p></div>
     <div className="module-grid">{cards.map(([title, description, icon, module, label]) => <article className="module-card" key={title}>
       <div className="module-icon">{icon}</div><div className="module-copy"><h2>{title}</h2><p>{description}</p></div>
       {module ? <button className="primary-button" onClick={() => onOpen(module)}>{label}</button> : <span className="soon"><Lock size={14} />Próximamente</span>}
