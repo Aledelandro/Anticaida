@@ -1,6 +1,23 @@
 const GEMINI_MODEL = "gemini-3.6-flash";
 
-async function callGemini(prompt) {
+export function safeParseGeminiJson(text) {
+  if (typeof text !== "string" || !text.trim()) return null;
+  const cleaned = text.replace(/```json/gi, "").replace(/```/g, "").trim();
+  try {
+    return JSON.parse(cleaned);
+  } catch {
+    const firstBrace = cleaned.indexOf("{");
+    const lastBrace = cleaned.lastIndexOf("}");
+    if (firstBrace < 0 || lastBrace <= firstBrace) return null;
+    try {
+      return JSON.parse(cleaned.slice(firstBrace, lastBrace + 1));
+    } catch {
+      return null;
+    }
+  }
+}
+
+async function callGemini(prompt, generationOverrides = {}) {
   const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
 
   if (!apiKey) {
@@ -27,7 +44,8 @@ async function callGemini(prompt) {
           generationConfig: {
             maxOutputTokens: 1200,
             temperature: 0.3,
-            responseMimeType: "application/json"
+            responseMimeType: "application/json",
+            ...generationOverrides
           }
         })
       }
@@ -58,17 +76,9 @@ async function callGemini(prompt) {
       return null;
     }
 
-    try {
-      return JSON.parse(
-        text
-          .replace(/```json/gi, "")
-          .replace(/```/g, "")
-          .trim()
-      );
-    } catch (parseError) {
-      console.error("Gemini JSON parse error:", parseError, text);
-      return null;
-    }
+    const parsed = safeParseGeminiJson(text);
+    if (!parsed) console.error("Gemini JSON parse error: respuesta incompleta o JSON inválido", text);
+    return parsed;
   } catch (error) {
     console.error("Gemini fetch error:", error);
     return null;
@@ -167,12 +177,18 @@ Herramientas disponibles:
 
 Criterios: si ha jugado, recaído, abandonado o fallado, recomienda antifall; si no consigue empezar, launch10; si ya sabe qué hacer y necesita foco, deepwork; en dudas de negocio piensa de forma práctica y recomienda launch10 o deepwork; conecta mentalidad con acción; usa la memoria real; endurece el tono ante patrones repetidos o según la preferencia, sin insultar. Responde de forma directa, útil y breve.
 
+Devuelve SOLO JSON válido. No uses saltos raros dentro de strings. No uses comillas sin escapar. No uses markdown. Completa y cierra siempre todos los strings, arrays y objetos.
+
 Devuelve SOLO JSON válido con esta forma exacta:
 {"respuesta":"string","diagnostico":"string","tono":"normal | directo | duro | muy_duro","tipo_problema":"caida | procrastinacion | arranque | trabajo_profundo | decision | emprendimiento | mentalidad | organizacion | otro","modulos_recomendados":[{"module":"antifall | launch10 | deepwork | stats | profile","titulo":"string","descripcion":"string","boton":"string"}],"accion_inmediata":"string","pregunta_siguiente":"string","memorias_a_guardar":[{"category":"string","memory_key":"string","memory_value":{}}]}.
 
 Contexto real: ${JSON.stringify(payload)}`;
   try {
-    const result = await withTimeout(callGemini(prompt), 30000);
+    const result = await withTimeout(callGemini(prompt, {
+      responseMimeType: "application/json",
+      maxOutputTokens: 1600,
+      temperature: 0.2
+    }), 30000);
     if (!result) throw new Error("Gemini no devolvió una respuesta válida");
     return result;
   } catch (error) {

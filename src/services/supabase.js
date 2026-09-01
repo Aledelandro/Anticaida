@@ -412,8 +412,8 @@ export async function updateDeepWorkMemory(userId, session) {
 export async function getCoachHistory(userId, limit = 30) {
   if (!supabase || !userId) return [];
   const { data, error } = await supabase
-    .from("coach_conversations")
-    .select("id,user_message,assistant_response,created_at")
+    .from("coach_messages")
+    .select("id,role,message,ai_result,created_at")
     .eq("user_id", userId)
     .order("created_at", { ascending: false })
     .limit(limit);
@@ -423,11 +423,10 @@ export async function getCoachHistory(userId, limit = 30) {
 
 export async function saveCoachExchange(userId, userMessage, assistantResponse) {
   if (!supabase || !userId) throw new Error(supabaseConfigurationError || "Supabase no está configurado.");
-  const { data, error } = await supabase.from("coach_conversations").insert({
-    user_id: userId,
-    user_message: String(userMessage || "").trim(),
-    assistant_response: assistantResponse
-  }).select().single();
+  const { data, error } = await supabase.from("coach_messages").insert([
+    { user_id: userId, role: "user", message: String(userMessage || "").trim(), ai_result: null },
+    { user_id: userId, role: "assistant", message: assistantResponse?.respuesta || "", ai_result: assistantResponse }
+  ]).select();
   if (error) throw error;
   return data;
 }

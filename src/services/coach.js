@@ -1,6 +1,7 @@
 const ALLOWED_MODULES = ["antifall", "launch10", "deepwork", "stats", "profile"];
 const ALLOWED_TONES = ["normal", "directo", "duro", "muy_duro"];
 const ALLOWED_PROBLEMS = ["caida", "procrastinacion", "arranque", "trabajo_profundo", "decision", "emprendimiento", "mentalidad", "organizacion", "otro"];
+const LOCAL_COACH_PREFIX = "modoEjecucionCoachMessages";
 
 const moduleCopy = {
   antifall: ["Sistema Anticaída", "Corta la caída y vuelve a ejecutar.", "Ir a Sistema Anticaída"],
@@ -13,6 +14,38 @@ const moduleCopy = {
 function recommendation(module) {
   const [titulo, descripcion, boton] = moduleCopy[module];
   return { module, titulo, descripcion, boton };
+}
+
+function localCoachKey(userId) {
+  return `${LOCAL_COACH_PREFIX}:${userId || "anonymous"}`;
+}
+
+export function readLocalCoachMessages(userId) {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(localCoachKey(userId)) || "[]");
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((item) =>
+      item && ["user", "assistant"].includes(item.role) && typeof item.text === "string" && item.createdAt
+    ).slice(-60);
+  } catch {
+    return [];
+  }
+}
+
+export function saveLocalCoachExchange(userId, userMessage, assistantResponse) {
+  const timestamp = new Date().toISOString();
+  const suffix = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const entries = [
+    { id: `local-${suffix}-user`, role: "user", text: String(userMessage || "").trim(), createdAt: timestamp, localOnly: true },
+    { id: `local-${suffix}-assistant`, role: "assistant", text: assistantResponse?.respuesta || "", response: assistantResponse, createdAt: timestamp, localOnly: true }
+  ];
+  try {
+    const history = readLocalCoachMessages(userId);
+    localStorage.setItem(localCoachKey(userId), JSON.stringify([...history, ...entries].slice(-60)));
+  } catch (error) {
+    console.error("Local coach persistence error:", error);
+  }
+  return entries;
 }
 
 export function normalizeCoachResult(result, fallback) {
