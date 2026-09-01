@@ -378,7 +378,6 @@ function App() {
   async function prepareDeepWorkPlan() {
     const memory = { deepWorkStats, history: deepWorkHistory.slice(0, 5) };
     const local = getLocalDeepWorkPlan(deepWork, memory);
-    patchDeepWork({ analysis: local });
     setDeepWorkStep("plan");
     setAiFallbackMessage("");
     setLoading(true);
@@ -387,14 +386,15 @@ function App() {
       const result = await analyzeDeepWorkWithGemini({
         tarea: deepWork.task, resultado_deseado: deepWork.desiredResult, duracion: deepWork.durationMinutes,
         distracciones: deepWork.distractions, otra_distraccion: deepWork.otherDistraction,
-        profile: userContext.profile, user_memory: userContext.userMemory,
-        historial_anticaida: userContext.antiFallSessions,
-        historial_arranque10: userContext.launch10Sessions,
-        historial_trabajo_profundo: userContext.deepWorkSessions
+        profile: summarizeProfile(userContext.profile),
+        user_memory: summarizeUserMemory(userContext.userMemory),
+        historial_anticaida: userContext.antiFallSessions?.slice(0, 3),
+        historial_arranque10: userContext.launch10Sessions?.slice(0, 3),
+        historial_trabajo_profundo: userContext.deepWorkSessions?.slice(0, 3)
       });
       const plan = normalizeDeepWorkPlan(result, local, deepWork.durationMinutes);
       patchDeepWork({ analysis: plan });
-      if (plan === local) setAiFallbackMessage("La IA tardó demasiado. He preparado un bloque local para que sigas ejecutando.");
+      if (plan === local) setAiFallbackMessage("La IA tardó demasiado. He preparado una versión local para que sigas ejecutando.");
     } finally {
       setLoading(false);
     }
@@ -445,6 +445,19 @@ function App() {
       )}
     </div></main>
   );
+}
+
+function summarizeProfile(profile) {
+  if (!profile) return null;
+  return { name: profile.name, tone_preference: profile.tone_preference };
+}
+
+function summarizeUserMemory(memory = []) {
+  return memory.slice(0, 12).map((item) => ({
+    category: item.category,
+    key: item.memory_key,
+    value: item.memory_value
+  }));
 }
 
 function normalizeAntiSession(row) {
@@ -711,35 +724,46 @@ const aiLoadingContent = {
   questionnaire: {
     title: "Preparando cuestionario",
     subtitle: "La IA está cerrando el alcance de tu tarea para que no tengas que pensar de más.",
-    steps: ["Analizando la tarea", "Detectando el bloqueo", "Generando preguntas útiles"]
+    steps: ["Analizando la tarea", "Detectando el bloqueo", "Generando preguntas útiles"],
+    timeoutSeconds: 20
   },
   plan: {
     title: "Generando plan de ejecución",
     subtitle: "La IA está convirtiendo tu tarea en pasos pequeños con duración aproximada.",
-    steps: ["Leyendo tus respuestas", "Dividiendo la tarea", "Calculando duración aproximada", "Preparando acción mínima"]
+    steps: ["Leyendo tus respuestas", "Dividiendo la tarea", "Calculando duración aproximada", "Preparando acción mínima"],
+    timeoutSeconds: 30
   },
   antifall: {
     title: "Activando protocolo",
     subtitle: "La IA está usando tu historial y tu memoria para ajustar el tono.",
-    steps: ["Revisando patrón", "Analizando emoción", "Ajustando dureza", "Preparando acción mínima"]
+    steps: ["Revisando patrón", "Analizando emoción", "Ajustando dureza", "Preparando acción mínima"],
+    timeoutSeconds: 20
   },
   deepwork: {
     title: "Preparando bloque",
     subtitle: "La IA está convirtiendo tu objetivo en un plan de ejecución.",
-    steps: ["Leyendo tu objetivo", "Revisando tu memoria", "Detectando distracciones", "Dividiendo el bloque"]
+    steps: ["Leyendo tu objetivo", "Revisando tu memoria", "Detectando distracciones", "Dividiendo el bloque", "Preparando plan final"],
+    timeoutSeconds: 35
   }
 };
 
 function AiLoadingScreen({ variant }) {
   const content = aiLoadingContent[variant];
   const [activeStep, setActiveStep] = useState(0);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
 
   useEffect(() => {
-    const timer = window.setInterval(() => {
+    const stepTimer = window.setInterval(() => {
       setActiveStep((current) => Math.min(current + 1, content.steps.length - 1));
-    }, 1800);
-    return () => window.clearInterval(timer);
-  }, [content.steps.length]);
+    }, Math.floor((content.timeoutSeconds * 1000) / content.steps.length));
+    const counterTimer = window.setInterval(() => {
+      setElapsedSeconds((current) => Math.min(current + 1, content.timeoutSeconds));
+    }, 1000);
+    return () => {
+      window.clearInterval(stepTimer);
+      window.clearInterval(counterTimer);
+    };
+  }, [content.steps.length, content.timeoutSeconds]);
 
   return <section className="screen ai-loading-screen" aria-live="polite" aria-busy="true">
     <div className="ai-loading-heading"><div className="ai-spinner" aria-hidden="true" /><div><p className="eyebrow">Procesando con IA</p><h1>{content.title}</h1><p className="subtitle">{content.subtitle}</p></div></div>
@@ -751,7 +775,7 @@ function AiLoadingScreen({ variant }) {
         <span>{step}</span>
       </div>;
     })}</div>
-    <p className="ai-loading-note">No cierres esta pantalla. Esto tarda unos segundos.</p>
+    <div className="ai-loading-counter"><span>Esto puede tardar hasta 30 segundos.</span><strong>{elapsedSeconds}s</strong></div>
   </section>;
 }
 
@@ -951,7 +975,7 @@ function DeepWorkPlan({ session, fallbackMessage, onStart, onRegenerate, onMenu 
   const plan = session.analysis;
   const total = plan?.pasos?.reduce((sum, item) => sum + Number(item.duracion_minutos || 0), 0) || session.durationMinutes;
   return <section className="screen"><StepHeader icon={<Clock />} title="Bloque preparado" text={plan?.mensaje_directo || "El alcance está cerrado. Ahora ejecuta."} />
-    {fallbackMessage && <p className="recommendation">{fallbackMessage}</p>}
+    {fallbackMessage && <p className="fallback-notice">{fallbackMessage}</p>}
     <div className={`analysis-card tone-${plan?.tono || "directo"}`}>
       <AnalysisItem label="Objetivo reformulado" value={plan?.objetivo_reformulado} />
       <AnalysisItem label="Regla del bloque" value={plan?.regla_del_bloque} />

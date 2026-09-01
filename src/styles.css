@@ -581,6 +581,36 @@ select:focus {
   text-align: center;
 }
 
+.ai-loading-counter {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 15px;
+  border: 1px solid #2d3340;
+  border-radius: 8px;
+  background: #15181e;
+  color: #858b96;
+  font-size: 0.9rem;
+}
+
+.ai-loading-counter strong {
+  color: #ffffff;
+  font-variant-numeric: tabular-nums;
+}
+
+.fallback-notice {
+  width: fit-content;
+  margin: 0;
+  padding: 9px 12px;
+  border: 1px solid #353a44;
+  border-radius: 7px;
+  background: #181b22;
+  color: #aeb3bc;
+  font-size: 0.86rem;
+  line-height: 1.45;
+}
+
 .action-panel {
   display: grid;
   gap: 18px;

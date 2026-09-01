@@ -25,7 +25,8 @@ async function callGemini(prompt) {
             }
           ],
           generationConfig: {
-            temperature: 0.4,
+            maxOutputTokens: 1200,
+            temperature: 0.3,
             responseMimeType: "application/json"
           }
         })
@@ -74,21 +75,30 @@ async function callGemini(prompt) {
   }
 }
 
-function withTimeout(promise, ms = 12000) {
-  return Promise.race([
-    promise,
-    new Promise((_, reject) =>
-      setTimeout(() => reject(new Error("Gemini timeout")), ms)
-    )
-  ]);
+function withTimeout(promise, ms = 30000) {
+  return new Promise((resolve, reject) => {
+    const timeoutId = setTimeout(() => reject(new Error(`Gemini timeout after ${ms}ms`)), ms);
+    Promise.resolve(promise).then(
+      (value) => {
+        clearTimeout(timeoutId);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timeoutId);
+        reject(error);
+      }
+    );
+  });
 }
 
 export async function analyzeAntiFallWithGemini(payload) {
   const prompt = `Eres el analizador del Sistema Anticaída. No des motivación genérica. Convierte el problema en una acción concreta y breve. Devuelve SOLO JSON válido: {"diagnostico":"string","tono":"normal | directo | duro | muy_duro","reset_fisico":"string","accion_minima":"string","mensaje_duro":"string","blindaje_recomendado":"string","pregunta_reflexion":"string"}. Datos: ${JSON.stringify(payload)}`;
   try {
-    return await withTimeout(callGemini(prompt));
+    const result = await withTimeout(callGemini(prompt), 20000);
+    if (!result) throw new Error("Gemini no devolvió una respuesta válida");
+    return result;
   } catch (error) {
-    console.error("Gemini anti_fall error:", error);
+    console.error("Gemini anti_fall error:", error.message);
     return null;
   }
 }
@@ -99,9 +109,11 @@ Reglas: cada paso dura entre 1 y 10 minutos; el plan total entre 5 y 30 minutos;
 Devuelve SOLO JSON válido: {"diagnostico":"string","categoria_tarea":"ads | shopify | estudio | video | producto | negocio | otro","accion_minima":"string","duracion_recomendada":10,"pasos":[{"titulo":"string","descripcion":"string","duracion_minutos":5,"resultado":"string"}],"primer_movimiento":"string","mensaje_directo":"string","no_hacer":["string","string","string"],"siguiente_paso_si_termina":"string","tono":"normal | directo | duro | muy_duro"}.
 Datos: ${JSON.stringify(payload)}`;
   try {
-    return await withTimeout(callGemini(prompt));
+    const result = await withTimeout(callGemini(prompt), 30000);
+    if (!result) throw new Error("Gemini no devolvió una respuesta válida");
+    return result;
   } catch (error) {
-    console.error("Gemini launch10 plan error:", error);
+    console.error("Gemini launch10 plan error:", error.message);
     return null;
   }
 }
@@ -113,22 +125,26 @@ Si trata de anuncios o campañas, pregunta plataforma, estado de creativos, copy
 Devuelve SOLO JSON válido: {"intro":"string","questions":[{"id":"string","question":"string","type":"single_choice | text","options":["string"]}]}.
 Datos: ${JSON.stringify(taskData)}`;
   try {
-    return await withTimeout(callGemini(prompt));
+    const result = await withTimeout(callGemini(prompt), 20000);
+    if (!result) throw new Error("Gemini no devolvió una respuesta válida");
+    return result;
   } catch (error) {
-    console.error("Gemini launch10 questionnaire error:", error);
+    console.error("Gemini launch10 questionnaire error:", error.message);
     return null;
   }
 }
 
 export async function analyzeDeepWorkWithGemini(payload) {
-  const prompt = `Eres el cerebro del módulo “Trabajo Profundo” dentro de una app llamada “Modo Ejecución”. Prepara un bloque serio, enfocado y ejecutable. No eres motivador, no das teoría, no haces planes enormes, no abres nuevas tareas y no permites pensar de más. Convierte la tarea y el resultado deseado en pasos concretos con duración, resultado visible y reglas claras. Usa la memoria: abandonos, distracciones, tono, herramientas, fallos y tareas completadas.
-Reglas: el total debe acercarse a la duración elegida; cada paso dura entre 5 y 25 minutos; cada paso tiene resultado visible; el primero puede hacerse ahora; reduce tareas grandes; limita anuncios a campaña/copy/creativo, web a una sección, estudio a un tema/ejercicio y vídeo a hook/guion/grabación/edición; endurece el mensaje si hay abandonos; no insultes ni humilles.
+  const prompt = `Prepara un bloque de Trabajo Profundo práctico y sin teoría. Convierte la tarea en pocos pasos ejecutables con resultado visible.
+Reglas: total cercano a la duración elegida; pasos de 5 a 25 minutos; primer paso inmediato; reduce el alcance si es grande; anuncios: campaña/copy/creativo; web: una sección; estudio: un tema/ejercicio; vídeo: hook/guion/grabación/edición. Usa la memoria para detectar distracciones y endurecer el tono sin insultar.
 Devuelve SOLO JSON válido: {"diagnostico":"string","objetivo_reformulado":"string","regla_del_bloque":"string","pasos":[{"titulo":"string","descripcion":"string","duracion_minutos":10,"resultado":"string"}],"distracciones_a_bloquear":["string"],"mensaje_directo":"string","criterio_de_exito":"string","si_te_bloqueas":"string","tono":"normal | directo | duro | muy_duro"}.
 Datos: ${JSON.stringify(payload)}`;
   try {
-    return await withTimeout(callGemini(prompt), 12000);
+    const result = await withTimeout(callGemini(prompt), 35000);
+    if (!result) throw new Error("Gemini no devolvió una respuesta válida");
+    return result;
   } catch (error) {
-    console.error("Gemini deep_work error:", error);
+    console.error("Gemini deep work error:", error.message);
     return null;
   }
 }
