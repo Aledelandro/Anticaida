@@ -1,6 +1,7 @@
 const ANTIFALL_HISTORY_KEY = "sistemaAnticaidaHistory";
 const ANTIFALL_ACTIVE_KEY = "sistemaAnticaidaActive";
 const LAUNCH_HISTORY_KEY = "modoEjecucionLaunchHistory";
+const DEEP_WORK_HISTORY_KEY = "modoEjecucionDeepWorkHistory";
 const COUNTERS_KEY = "modoEjecucionCounters";
 
 function readArray(key) {
@@ -18,6 +19,7 @@ function writeArray(key, value) {
 
 export const readHistory = () => readArray(ANTIFALL_HISTORY_KEY);
 export const readLaunchHistory = () => readArray(LAUNCH_HISTORY_KEY);
+export const readDeepWorkHistory = () => readArray(DEEP_WORK_HISTORY_KEY);
 export const saveActiveProtocol = (protocol) => localStorage.setItem(ANTIFALL_ACTIVE_KEY, JSON.stringify(protocol));
 export const clearActiveProtocol = () => localStorage.removeItem(ANTIFALL_ACTIVE_KEY);
 
@@ -32,15 +34,15 @@ export function updateActiveProtocol(values) {
 
 function readCounters() {
   try {
-    return { antifallStarted: 0, launchStarted: 0, ...JSON.parse(localStorage.getItem(COUNTERS_KEY) || "{}") };
+    return { antifallStarted: 0, launchStarted: 0, deepWorkStarted: 0, ...JSON.parse(localStorage.getItem(COUNTERS_KEY) || "{}") };
   } catch {
-    return { antifallStarted: 0, launchStarted: 0 };
+    return { antifallStarted: 0, launchStarted: 0, deepWorkStarted: 0 };
   }
 }
 
 export function recordProtocolStarted(module) {
   const counters = readCounters();
-  const key = module === "launch10" ? "launchStarted" : "antifallStarted";
+  const key = module === "launch10" ? "launchStarted" : module === "deepwork" ? "deepWorkStarted" : "antifallStarted";
   counters[key] += 1;
   localStorage.setItem(COUNTERS_KEY, JSON.stringify(counters));
 }
@@ -77,6 +79,26 @@ export function createLaunchRecord(launch) {
 export function saveLaunch(launch) {
   const record = createLaunchRecord(launch);
   writeArray(LAUNCH_HISTORY_KEY, [record, ...readLaunchHistory()]);
+  return record;
+}
+
+export function createDeepWorkRecord(session) {
+  return {
+    ...session,
+    id: crypto.randomUUID(),
+    module: "deepwork",
+    date: session.startedAt || new Date().toISOString(),
+    endedAt: session.endedAt || new Date().toISOString(),
+    completed: Boolean(session.completed),
+    abandoned: Boolean(session.abandoned),
+    durationMinutes: Number(session.durationMinutes || 45),
+    stepsCompleted: Number(session.stepsCompleted || 0)
+  };
+}
+
+export function saveDeepWork(session) {
+  const record = createDeepWorkRecord(session);
+  writeArray(DEEP_WORK_HISTORY_KEY, [record, ...readDeepWorkHistory()]);
   return record;
 }
 
@@ -143,11 +165,33 @@ export function getLaunchStats(history = readLaunchHistory()) {
   };
 }
 
-export function getCombinedStats(antiHistory = readHistory(), launchHistory = readLaunchHistory()) {
-  const anti = getStats(antiHistory), launch = getLaunchStats(launchHistory);
-  const recent = [...antiHistory, ...launchHistory].sort((a, b) => new Date(b.date) - new Date(a.date)).slice(0, 5);
-  return { anti, launch, total: anti.total + launch.total, completed: anti.completed + launch.completed,
-    failed: anti.failed + launch.failed, bestStreak: Math.max(anti.bestCompletionStreak, launch.bestCompletionStreak),
+export function getDeepWorkStats(history = readDeepWorkHistory()) {
+  const completed = history.filter((item) => item.completed).length;
+  const abandoned = history.filter((item) => item.abandoned).length;
+  const distractions = history.flatMap((item) => [
+    ...(Array.isArray(item.distractions) ? item.distractions : []),
+    item.distractionReport
+  ]);
+  return {
+    total: Math.max(readCounters().deepWorkStarted, history.length),
+    completed,
+    failed: abandoned,
+    minutes: history.filter((item) => item.completed).reduce((sum, item) => sum + Number(item.durationMinutes || 0), 0),
+    bestCompletionStreak: bestStreak(history),
+    mostRepeatedDistraction: mostRepeated(distractions),
+    mostRepeatedTask: mostRepeated(history.map((item) => item.task)),
+    recent: history.slice(0, 5)
+  };
+}
+
+export function getCombinedStats(antiHistory = readHistory(), launchHistory = readLaunchHistory(), deepWorkHistory = readDeepWorkHistory()) {
+  const anti = getStats(antiHistory), launch = getLaunchStats(launchHistory), deepWork = getDeepWorkStats(deepWorkHistory);
+  const recent = [...antiHistory, ...launchHistory, ...deepWorkHistory].sort((a, b) => new Date(b.date) - new Date(a.date)).slice(0, 5);
+  const total = anti.total + launch.total + deepWork.total;
+  const completed = anti.completed + launch.completed + deepWork.completed;
+  return { anti, launch, deepWork, total, completed,
+    failed: anti.failed + launch.failed + deepWork.failed, compliance: total ? Math.round((completed / total) * 100) : 0,
+    bestStreak: Math.max(anti.bestCompletionStreak, launch.bestCompletionStreak, deepWork.bestCompletionStreak),
     failStreak: Math.max(anti.failStreak, launch.failStreak), recent };
 }
 
@@ -299,3 +343,59 @@ export function getLocalLaunchPlan(task, blockage, answers = {}, stats = getLaun
 }
 
 export const getLocalLaunchProtocol = (launch, stats) => getLocalLaunchPlan(launch.task, launch.blockage, launch.answers, stats);
+
+export function getLocalDeepWorkPlan(data, memory = {}) {
+  const text = `${data.task || ""} ${data.desiredResult || ""}`.toLowerCase();
+  const templates = /ads|anuncio|campaña|meta|tiktok/.test(text) ? [
+    ["Definir el objetivo", "Cierra el alcance a una campaña, creativo o pieza de copy.", "Objetivo y alcance escritos."],
+    ["Escribir hooks", "Crea los hooks necesarios sin editar mientras escribes.", "Hooks en borrador."],
+    ["Revisar el creativo", "Comprueba mensaje, formato y coherencia con la oferta.", "Creativo revisado."],
+    ["Configurar la campaña", "Completa la configuración imprescindible sin publicarla.", "Campaña configurada en borrador."],
+    ["Guardar y revisar", "Haz una revisión final y guarda una versión localizable.", "Borrador guardado."]
+  ] : /shopify|web|landing|hero|producto/.test(text) ? [
+    ["Abrir el editor", "Abre la página y sección exactas que vas a modificar.", "Sección correcta abierta."],
+    ["Aislar el cambio", "Define una sola mejora visible y no amplíes el alcance.", "Cambio concreto definido."],
+    ["Ejecutar el cambio", "Modifica únicamente esa sección hasta dejarla funcional.", "Cambio visible aplicado."],
+    ["Revisar móvil", "Comprueba el resultado en pantalla pequeña y corrige lo esencial.", "Vista móvil revisada."],
+    ["Guardar", "Guarda y verifica que el cambio persiste.", "Versión guardada."]
+  ] : /estudiar|tema|examen/.test(text) ? [
+    ["Leer", "Lee el apartado concreto marcando solo las ideas clave.", "Apartado leído."],
+    ["Resumir", "Resume el contenido sin consultar el texto durante el primer intento.", "Resumen breve escrito."],
+    ["Practicar", "Resuelve ejercicios o preguntas sobre el tema.", "Práctica completada."],
+    ["Repasar", "Revisa errores y fija los puntos débiles.", "Errores revisados."]
+  ] : /video|vídeo|grabar|editar/.test(text) ? [
+    ["Cerrar el hook", "Escribe o selecciona un hook concreto.", "Hook definitivo."],
+    ["Preparar el guion", "Completa un guion ejecutable sin añadir ideas nuevas.", "Guion listo."],
+    ["Grabar", "Graba las tomas necesarias siguiendo el guion.", "Tomas grabadas."],
+    ["Revisar y editar", "Monta una primera versión y corrige solo fallos evidentes.", "Primer corte terminado."],
+    ["Exportar", "Exporta o guarda una versión lista para el siguiente paso.", "Versión exportada."]
+  ] : [
+    ["Preparar", "Abre solo las herramientas y archivos necesarios.", "Entorno de trabajo listo."],
+    ["Ejecutar la parte central", "Trabaja en el resultado concreto sin cambiar de tarea.", "Resultado principal avanzado."],
+    ["Cerrar el entregable", "Completa la versión mínima que cumple el objetivo.", "Entregable mínimo terminado."],
+    ["Revisar y guardar", "Comprueba lo esencial y deja el resultado guardado.", "Resultado revisado y guardado."]
+  ];
+  const duration = Number(data.durationMinutes || 45);
+  const count = Math.min(templates.length, Math.max(2, Math.floor(duration / 10)));
+  const selected = templates.slice(0, count);
+  const base = Math.floor(duration / count);
+  const remainder = duration - base * count;
+  const pasos = selected.map(([titulo, descripcion, resultado], index) => ({
+    titulo, descripcion,
+    duracion_minutos: base + (index < remainder ? 1 : 0),
+    resultado
+  }));
+  const distractions = (data.distractions || []).map((item) => item === "Otra" && data.otherDistraction?.trim() ? data.otherDistraction.trim() : item);
+  const pastFailures = Number(memory?.deepWorkStats?.failed || 0);
+  return {
+    diagnostico: `El bloque necesita producir “${data.desiredResult}” sin ampliar la tarea.`,
+    objetivo_reformulado: `Dejar terminado: ${data.desiredResult}.`,
+    regla_del_bloque: `Durante ${duration} minutos solo trabajas en ${data.task}. No cambias de tarea ni abres contenido ajeno al objetivo.`,
+    pasos,
+    distracciones_a_bloquear: distractions.length ? distractions.map((item) => item === "Móvil" ? "Móvil lejos" : `Bloquear ${item.toLowerCase()}`) : ["Móvil lejos", "No cambiar de tarea"],
+    mensaje_directo: pastFailures ? "Ya hay abandonos registrados. Reduce el paso si hace falta, pero no escapes del bloque." : "Empieza por el paso 1 y no negocies con otra tarea.",
+    criterio_de_exito: `El bloque cuenta como completado si ${data.desiredResult}.`,
+    si_te_bloqueas: "Reduce el paso actual a 5 minutos y sigue. No reinicies el plan.",
+    tono: pastFailures >= 3 ? "muy_duro" : pastFailures ? "duro" : "directo"
+  };
+}

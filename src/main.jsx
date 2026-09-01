@@ -1,17 +1,17 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { Activity, AlertTriangle, BarChart3, CheckCircle2, ChevronLeft, Clock, Dumbbell, Flame, Lock, LogOut, Play, Rocket, RotateCcw, Shield, Target, User, XCircle } from "lucide-react";
+import { Activity, AlertTriangle, BarChart3, CheckCircle2, ChevronLeft, Clock, Dumbbell, Flame, Lock, LogOut, Pause, Play, Rocket, RotateCcw, Shield, Target, User, XCircle } from "lucide-react";
 import "./styles.css";
 import { getProblemConfig, problemOptions } from "./problemConfigs";
-import { analyzeAntiFallWithGemini, analyzeLaunchWithGemini, generateLaunchQuestionnaireWithGemini } from "./services/gemini";
+import { analyzeAntiFallWithGemini, analyzeDeepWorkWithGemini, analyzeLaunchWithGemini, generateLaunchQuestionnaireWithGemini } from "./services/gemini";
 import {
-  buildGeminiPayload, createLaunchRecord, createProtocolRecord, fallbackAnalysis, getCombinedStats, getLaunchStats, getLocalLaunchPlan, getLocalLaunchQuestionnaire, getStats,
-  markActiveFailureIfNeeded, readHistory, readLaunchHistory, recordProtocolStarted, saveActiveProtocol,
-  saveLaunch, saveProtocol, updateActiveProtocol, updateLatestLaunch
+  buildGeminiPayload, createDeepWorkRecord, createLaunchRecord, createProtocolRecord, fallbackAnalysis, getCombinedStats, getDeepWorkStats, getLaunchStats, getLocalDeepWorkPlan, getLocalLaunchPlan, getLocalLaunchQuestionnaire, getStats,
+  markActiveFailureIfNeeded, readDeepWorkHistory, readHistory, readLaunchHistory, recordProtocolStarted, saveActiveProtocol,
+  saveDeepWork, saveLaunch, saveProtocol, updateActiveProtocol, updateLatestLaunch
 } from "./services/storage";
 import {
   debugSupabaseConnection, ensureUserProfile, isSupabaseConfigured, loadUserContext, saveAntiFallSession,
-  saveLaunch10Session, saveOnboarding, supabase, supabaseConfigurationError, updateLaunch10Session, updateProfile
+  saveDeepWorkSession, saveLaunch10Session, saveOnboarding, supabase, supabaseConfigurationError, updateDeepWorkMemory, updateLaunch10Session, updateProfile
 } from "./services/supabase";
 
 const initialProtocol = {
@@ -23,6 +23,12 @@ const initialProtocol = {
 const initialLaunch = {
   task: "", desiredResult: "", blockage: "", customBlockage: "", excuse: "", analysis: null,
   questionnaire: null, answers: {}, duration: 10, actualResult: "", completed: false, startedAt: "", saved: false
+};
+
+const initialDeepWork = {
+  task: "", desiredResult: "", durationMinutes: 45, distractions: [], otherDistraction: "", analysis: null,
+  stepsCompleted: 0, actualResult: "", pending: "", distracted: "No", distractionReport: "",
+  successLevel: "Sí", completed: false, abandoned: false, startedAt: "", saved: false
 };
 
 const launchBlockages = [
@@ -46,16 +52,20 @@ function App() {
   const [currentModule, setCurrentModule] = useState("menu");
   const [antiStep, setAntiStep] = useState("home");
   const [launchStep, setLaunchStep] = useState("home");
+  const [deepWorkStep, setDeepWorkStep] = useState("home");
   const [protocol, setProtocol] = useState(initialProtocol);
   const [launch, setLaunch] = useState(initialLaunch);
+  const [deepWork, setDeepWork] = useState(initialDeepWork);
   const [antiHistory, setAntiHistory] = useState(() => readHistory());
   const [launchHistory, setLaunchHistory] = useState(() => readLaunchHistory());
+  const [deepWorkHistory, setDeepWorkHistory] = useState(() => readDeepWorkHistory());
   const [loading, setLoading] = useState(false);
   const [aiFallbackMessage, setAiFallbackMessage] = useState("");
 
   const antiStats = useMemo(() => getStats(antiHistory), [antiHistory]);
   const launchStats = useMemo(() => getLaunchStats(launchHistory), [launchHistory]);
-  const combinedStats = useMemo(() => getCombinedStats(antiHistory, launchHistory), [antiHistory, launchHistory]);
+  const deepWorkStats = useMemo(() => getDeepWorkStats(deepWorkHistory), [deepWorkHistory]);
+  const combinedStats = useMemo(() => getCombinedStats(antiHistory, launchHistory, deepWorkHistory), [antiHistory, launchHistory, deepWorkHistory]);
   const config = getProblemConfig(protocol.problemId);
   const problemStats = useMemo(() => getStats(antiHistory, protocol.problemId), [antiHistory, protocol.problemId]);
   const firmness = toneFromFailures(problemStats.failStreak, config);
@@ -96,6 +106,7 @@ function App() {
         if (!active) return;
         setAntiHistory(context.antiFallSessions.map(normalizeAntiSession));
         setLaunchHistory(context.launch10Sessions.map(normalizeLaunchSession));
+        setDeepWorkHistory(context.deepWorkSessions.map(normalizeDeepWorkSession));
         setDataMessage("");
       } catch (error) {
         if (!active) return;
@@ -135,11 +146,16 @@ function App() {
     setLaunch((current) => ({ ...current, ...values }));
   }
 
+  function patchDeepWork(values) {
+    setDeepWork((current) => ({ ...current, ...values }));
+  }
+
   function openModule(module) {
     setAiFallbackMessage("");
     setCurrentModule(module);
     if (module === "antifall") setAntiStep("home");
     if (module === "launch10") setLaunchStep("home");
+    if (module === "deepwork") setDeepWorkStep("home");
   }
 
   async function persistAnti(finished) {
@@ -181,6 +197,29 @@ function App() {
     }
   }
 
+  async function persistDeepWork(finished) {
+    const prepared = {
+      ...finished,
+      distractions: (finished.distractions || []).map((item) => item === "Otra" && finished.otherDistraction?.trim() ? finished.otherDistraction.trim() : item)
+    };
+    const record = createDeepWorkRecord(prepared);
+    try {
+      const remote = await saveDeepWorkSession(prepared);
+      const saved = { ...record, id: remote?.id || record.id };
+      setDeepWorkHistory((history) => [saved, ...history]);
+      updateDeepWorkMemory(session.user.id, prepared).catch((error) => {
+        console.error("Deep work memory update error:", error);
+        setDataMessage(`El bloque se guardó, pero no se pudo actualizar la memoria: ${error?.message || "Error desconocido"}.`);
+      });
+      return saved;
+    } catch (error) {
+      const saved = saveDeepWork(prepared);
+      setDeepWorkHistory(readDeepWorkHistory());
+      setDataMessage(`No se pudo guardar en Supabase: ${error?.message || "Error desconocido"}. La sesión quedó respaldada localmente.`);
+      return saved;
+    }
+  }
+
   async function getGeminiContext() {
     try {
       return await loadUserContext(session.user.id);
@@ -189,7 +228,8 @@ function App() {
         profile,
         userMemory: [],
         antiFallSessions: antiHistory.slice(0, 5),
-        launch10Sessions: launchHistory.slice(0, 5)
+        launch10Sessions: launchHistory.slice(0, 5),
+        deepWorkSessions: deepWorkHistory.slice(0, 5)
       };
     }
   }
@@ -202,6 +242,10 @@ function App() {
     if (currentModule === "launch10" && !["home", "summary"].includes(launchStep) && launch.startedAt && !launch.saved) {
       await persistLaunch({ ...launch, blockage: effectiveBlockage(launch), completed: false });
       setLaunch(initialLaunch);
+    }
+    if (currentModule === "deepwork" && !["home", "summary"].includes(deepWorkStep) && deepWork.startedAt && !deepWork.saved) {
+      await persistDeepWork({ ...deepWork, completed: false, abandoned: true, successLevel: "No", endedAt: new Date().toISOString() });
+      setDeepWork(initialDeepWork);
     }
     setCurrentModule("menu");
   }
@@ -324,6 +368,52 @@ function App() {
     patchLaunch({ saved: true });
   }
 
+  function startDeepWork() {
+    setAiFallbackMessage("");
+    recordProtocolStarted("deepwork");
+    setDeepWork({ ...initialDeepWork, startedAt: new Date().toISOString() });
+    setDeepWorkStep("setup");
+  }
+
+  async function prepareDeepWorkPlan() {
+    const memory = { deepWorkStats, history: deepWorkHistory.slice(0, 5) };
+    const local = getLocalDeepWorkPlan(deepWork, memory);
+    patchDeepWork({ analysis: local });
+    setDeepWorkStep("plan");
+    setAiFallbackMessage("");
+    setLoading(true);
+    try {
+      const userContext = await getGeminiContext();
+      const result = await analyzeDeepWorkWithGemini({
+        tarea: deepWork.task, resultado_deseado: deepWork.desiredResult, duracion: deepWork.durationMinutes,
+        distracciones: deepWork.distractions, otra_distraccion: deepWork.otherDistraction,
+        profile: userContext.profile, user_memory: userContext.userMemory,
+        historial_anticaida: userContext.antiFallSessions,
+        historial_arranque10: userContext.launch10Sessions,
+        historial_trabajo_profundo: userContext.deepWorkSessions
+      });
+      const plan = normalizeDeepWorkPlan(result, local, deepWork.durationMinutes);
+      patchDeepWork({ analysis: plan });
+      if (plan === local) setAiFallbackMessage("La IA tardó demasiado. He preparado un bloque local para que sigas ejecutando.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function abandonDeepWork(stepsCompleted) {
+    const finished = { ...deepWork, stepsCompleted, completed: false, abandoned: true, successLevel: "No", saved: true, endedAt: new Date().toISOString() };
+    await persistDeepWork(finished);
+    setDeepWork(finished);
+    setDeepWorkStep("summary");
+  }
+
+  async function saveDeepWorkReview() {
+    const finished = { ...deepWork, completed: true, abandoned: false, saved: true, endedAt: new Date().toISOString() };
+    await persistDeepWork(finished);
+    setDeepWork(finished);
+    setDeepWorkStep("summary");
+  }
+
   if (authLoading) return <AppLoading text="Comprobando sesión…" />;
   if (!isSupabaseConfigured) return <AppLoading text={supabaseConfigurationError} />;
   if (!session) return <AuthScreen />;
@@ -347,6 +437,12 @@ function App() {
           onQuestionnaire={generateLaunchQuestionnaire} onGenerate={generateLaunchAction} onStep={setLaunchStep}
           onFinish={finishLaunch} onSave={saveLaunchResult} onMenu={goMenu} />
       )}
+      {currentModule === "deepwork" && (
+        <DeepWorkModule step={deepWorkStep} session={deepWork} loading={loading} fallbackMessage={aiFallbackMessage}
+          onPatch={patchDeepWork} onStart={startDeepWork} onPrepare={prepareDeepWorkPlan} onStep={setDeepWorkStep}
+          onAbandon={abandonDeepWork} onSave={saveDeepWorkReview} onMenu={goMenu}
+          onStats={() => { setCurrentModule("stats"); }} />
+      )}
     </div></main>
   );
 }
@@ -369,6 +465,16 @@ function normalizeLaunchSession(row) {
     blockage: row.blockage || "", excuse: row.excuse || "", questionnaire: null,
     answers: row.questionnaire_answers || {}, analysis: row.plan, duration: row.plan?.duracion_recomendada || 10,
     actualResult: row.result_text || "", completed: Boolean(row.completed), abandoned: Boolean(row.abandoned), saved: true
+  };
+}
+
+function normalizeDeepWorkSession(row) {
+  return {
+    id: row.id, module: "deepwork", date: row.created_at, task: row.task || "", desiredResult: row.desired_result || "",
+    durationMinutes: Number(row.duration_minutes || 45), distractions: row.distractions || [], analysis: row.ai_plan || null,
+    completed: Boolean(row.completed), abandoned: Boolean(row.abandoned), successLevel: row.success_level || "No",
+    actualResult: row.actual_result || "", pending: row.pending || "", distractionReport: row.distraction_report || "",
+    stepsCompleted: Number(row.steps_completed || 0), saved: true
   };
 }
 
@@ -554,6 +660,24 @@ function normalizeLaunchPlan(result, fallback) {
   };
 }
 
+function normalizeDeepWorkPlan(result, fallback, duration) {
+  if (!result || !Array.isArray(result.pasos) || !result.pasos.length) return fallback;
+  const pasos = result.pasos.slice(0, 8).map((step, index) => ({
+    titulo: String(step?.titulo || `Paso ${index + 1}`),
+    descripcion: String(step?.descripcion || "Ejecuta este paso sin ampliar el alcance."),
+    duracion_minutos: Math.min(25, Math.max(5, Number(step?.duracion_minutos) || 10)),
+    resultado: String(step?.resultado || "Resultado visible completado.")
+  }));
+  const total = pasos.reduce((sum, step) => sum + step.duracion_minutos, 0);
+  if (Math.abs(total - Number(duration)) > Math.max(10, Number(duration) * 0.3)) return fallback;
+  const tones = ["normal", "directo", "duro", "muy_duro"];
+  return {
+    ...fallback, ...result, pasos,
+    distracciones_a_bloquear: Array.isArray(result.distracciones_a_bloquear) ? result.distracciones_a_bloquear.map(String).slice(0, 8) : fallback.distracciones_a_bloquear,
+    tono: tones.includes(result.tono) ? result.tono : fallback.tono
+  };
+}
+
 function TopBar({ currentModule, antiStats, onMenu, onStats }) {
   return <header className="topbar">
     <button className="brand" onClick={onMenu}><Target size={22} />Modo Ejecución</button>
@@ -569,7 +693,7 @@ function MainMenu({ onOpen, onProfile }) {
   const cards = [
     ["Sistema Anticaída", "Cuando estás a punto de caer, jugar, procrastinar o abandonar.", <Shield />, "antifall", "Entrar"],
     ["Arranque 10", "Cuando sabes lo que tienes que hacer, pero no consigues empezar.", <Rocket />, "launch10", "Entrar"],
-    ["Trabajo Profundo", "Bloques serios de ejecución con objetivo claro.", <Clock />],
+    ["Trabajo Profundo", "Bloques serios de ejecución con objetivo claro.", <Clock />, "deepwork", "Entrar"],
     ["Decisión Rápida", "Cuando estás bloqueado dudando.", <AlertTriangle />],
     ["Detector de Excusas", "Cuando te estás contando una mentira para no actuar.", <Activity />],
     ["Estadísticas", "Tu identidad medida en datos.", <BarChart3 />, "stats", "Ver estadísticas"]
@@ -598,6 +722,11 @@ const aiLoadingContent = {
     title: "Activando protocolo",
     subtitle: "La IA está usando tu historial y tu memoria para ajustar el tono.",
     steps: ["Revisando patrón", "Analizando emoción", "Ajustando dureza", "Preparando acción mínima"]
+  },
+  deepwork: {
+    title: "Preparando bloque",
+    subtitle: "La IA está convirtiendo tu objetivo en un plan de ejecución.",
+    steps: ["Leyendo tu objetivo", "Revisando tu memoria", "Detectando distracciones", "Dividiendo el bloque"]
   }
 };
 
@@ -790,6 +919,139 @@ function LaunchSummary({ launch, onPatch, onSave, onStart, onMenu }) {
   </section>;
 }
 
+const deepWorkDistractions = ["Juegos", "Móvil", "YouTube", "Redes sociales", "Dudas", "Perfeccionismo", "Cansancio", "Otra"];
+
+function DeepWorkModule({ step, session, loading, fallbackMessage, onPatch, onStart, onPrepare, onStep, onAbandon, onSave, onMenu, onStats }) {
+  if (step === "home") return <section className="screen home"><div className="stack center"><p className="eyebrow">Modo de concentración</p><h1>Trabajo Profundo</h1><p className="subtitle">Bloques serios de ejecución con objetivo claro.</p><p className="launch-mantra">Durante este bloque no buscas motivación. Buscas foco.</p><div className="button-row center"><button className="primary-button large" onClick={onStart}><Play size={20} />Empezar bloque</button><button className="secondary-button" onClick={onMenu}>Menú</button></div></div></section>;
+  if (step === "setup") return <DeepWorkSetup session={session} onPatch={onPatch} onPrepare={onPrepare} onMenu={onMenu} />;
+  if (step === "plan" && loading) return <AiLoadingScreen variant="deepwork" />;
+  if (step === "plan") return <DeepWorkPlan session={session} fallbackMessage={fallbackMessage} onStart={() => onStep("timer")} onRegenerate={onPrepare} onMenu={onMenu} />;
+  if (step === "timer") return <DeepWorkTimer session={session} onPatch={onPatch} onComplete={(stepsCompleted) => { onPatch({ stepsCompleted }); onStep("review"); }} onAbandon={onAbandon} onMenu={onMenu} />;
+  if (step === "review") return <DeepWorkReview session={session} onPatch={onPatch} onSave={onSave} onMenu={onMenu} />;
+  return <DeepWorkSummary session={session} onStart={onStart} onMenu={onMenu} onStats={onStats} />;
+}
+
+function DeepWorkSetup({ session, onPatch, onPrepare, onMenu }) {
+  const valid = session.task.trim() && session.desiredResult.trim();
+  function toggle(item) {
+    const selected = session.distractions.includes(item);
+    onPatch({ distractions: selected ? session.distractions.filter((value) => value !== item) : [...session.distractions, item] });
+  }
+  return <section className="screen"><StepHeader icon={<Target />} title="Prepara el bloque" text="Cierra el objetivo antes de poner el reloj en marcha." />
+    <label className="field"><span>¿Qué vas a trabajar?</span><textarea autoFocus value={session.task} onChange={(e) => onPatch({ task: e.target.value })} placeholder="Ejemplo: editar campaña de Meta Ads, cambiar landing, estudiar tema, preparar vídeo…" /></label>
+    <label className="field"><span>¿Qué resultado concreto debe quedar terminado?</span><textarea value={session.desiredResult} onChange={(e) => onPatch({ desiredResult: e.target.value })} placeholder="Ejemplo: campaña en borrador, hero cambiado, 3 hooks escritos, 1 tema estudiado…" /></label>
+    <div className="field"><span>¿Cuánto tiempo quieres trabajar?</span><div className="option-grid compact">{[25, 45, 60, 90].map((minutes) => <button className={`option ${session.durationMinutes === minutes ? "selected" : ""}`} key={minutes} onClick={() => onPatch({ durationMinutes: minutes })}>{minutes} minutos</button>)}</div></div>
+    <div className="field"><span>¿Qué puede distraerte durante el bloque?</span><div className="option-grid compact">{deepWorkDistractions.map((item) => <button className={`option ${session.distractions.includes(item) ? "selected" : ""}`} key={item} onClick={() => toggle(item)}>{item}</button>)}</div></div>
+    {session.distractions.includes("Otra") && <label className="field"><span>Otra distracción</span><input value={session.otherDistraction} onChange={(e) => onPatch({ otherDistraction: e.target.value })} placeholder="Describe la distracción" /></label>}
+    <div className="button-row"><button className="primary-button large" disabled={!valid} onClick={onPrepare}>Preparar bloque</button><button className="secondary-button" onClick={onMenu}>Menú</button></div>
+  </section>;
+}
+
+function DeepWorkPlan({ session, fallbackMessage, onStart, onRegenerate, onMenu }) {
+  const plan = session.analysis;
+  const total = plan?.pasos?.reduce((sum, item) => sum + Number(item.duracion_minutos || 0), 0) || session.durationMinutes;
+  return <section className="screen"><StepHeader icon={<Clock />} title="Bloque preparado" text={plan?.mensaje_directo || "El alcance está cerrado. Ahora ejecuta."} />
+    {fallbackMessage && <p className="recommendation">{fallbackMessage}</p>}
+    <div className={`analysis-card tone-${plan?.tono || "directo"}`}>
+      <AnalysisItem label="Objetivo reformulado" value={plan?.objetivo_reformulado} />
+      <AnalysisItem label="Regla del bloque" value={plan?.regla_del_bloque} />
+      <div className="execution-plan"><div className="plan-heading"><div><p className="eyebrow">Plan de ejecución</p><h2>{plan?.pasos?.length || 0} pasos concretos</h2></div><strong>{total} min</strong></div>{plan?.pasos?.map((item, index) => <div className="plan-step" key={`${item.titulo}-${index}`}><span className="step-number">{index + 1}</span><div><div className="step-title"><h3>{item.titulo}</h3><b>{item.duracion_minutos} min</b></div><p>{item.descripcion}</p><small>Resultado: {item.resultado}</small></div></div>)}</div>
+      <div className="dont-list"><p className="eyebrow">Distracciones a bloquear</p><ul>{plan?.distracciones_a_bloquear?.map((item) => <li key={item}>{item}</li>)}</ul></div>
+      <div className="analysis-grid"><AnalysisItem label="Criterio de éxito" value={plan?.criterio_de_exito} /><AnalysisItem label="Si te bloqueas" value={plan?.si_te_bloqueas} /></div>
+    </div>
+    <div className="button-row"><button className="primary-button large" onClick={onStart}><Play size={20} />Empezar bloque</button><button className="secondary-button" onClick={onRegenerate}><RotateCcw size={17} />Regenerar plan</button><button className="ghost-button" onClick={onMenu}>Menú</button></div>
+  </section>;
+}
+
+function DeepWorkTimer({ session, onPatch, onComplete, onAbandon, onMenu }) {
+  const steps = session.analysis?.pasos || [];
+  const [current, setCurrent] = useState(0);
+  const [stepsCompleted, setStepsCompleted] = useState(0);
+  const [totalSeconds, setTotalSeconds] = useState(session.durationMinutes * 60);
+  const [stepSeconds, setStepSeconds] = useState((steps[0]?.duracion_minutos || session.durationMinutes) * 60);
+  const [running, setRunning] = useState(true);
+  const [showAbandon, setShowAbandon] = useState(false);
+  const [finished, setFinished] = useState(false);
+  const step = steps[current];
+
+  useEffect(() => {
+    if (!running || finished) return undefined;
+    const timer = window.setInterval(() => {
+      setTotalSeconds((value) => Math.max(0, value - 1));
+      setStepSeconds((value) => Math.max(0, value - 1));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [running, finished]);
+
+  useEffect(() => {
+    if (finished || totalSeconds > 0) return;
+    const finalCompleted = stepSeconds <= 0 ? Math.min(steps.length, stepsCompleted + 1) : stepsCompleted;
+    setFinished(true);
+    onComplete(finalCompleted);
+  }, [totalSeconds, stepSeconds, steps.length, finished, onComplete, stepsCompleted]);
+
+  useEffect(() => {
+    if (finished || stepSeconds > 0 || totalSeconds <= 0) return;
+    const nextCompleted = Math.min(steps.length, stepsCompleted + 1);
+    setStepsCompleted(nextCompleted);
+    onPatch({ stepsCompleted: nextCompleted });
+    if (current >= steps.length - 1) {
+      setFinished(true);
+      onComplete(nextCompleted);
+    } else {
+      const next = current + 1;
+      setCurrent(next);
+      setStepSeconds(Number(steps[next]?.duracion_minutos || 5) * 60);
+    }
+  }, [stepSeconds, totalSeconds, finished, current, steps, stepsCompleted, onPatch, onComplete]);
+
+  function completeStep() {
+    const nextCompleted = Math.min(steps.length, stepsCompleted + 1);
+    setStepsCompleted(nextCompleted);
+    onPatch({ stepsCompleted: nextCompleted });
+    if (current >= steps.length - 1) {
+      setFinished(true);
+      onComplete(nextCompleted);
+    } else {
+      const next = current + 1;
+      setCurrent(next);
+      setStepSeconds(Number(steps[next]?.duracion_minutos || 5) * 60);
+    }
+  }
+
+  if (!step) return <section className="screen"><p>No hay pasos disponibles.</p><button className="primary-button" onClick={() => onComplete(0)}>Finalizar</button><button className="secondary-button" onClick={onMenu}>Menú</button></section>;
+  const progress = Math.round(((session.durationMinutes * 60 - totalSeconds) / (session.durationMinutes * 60)) * 100);
+  return <section className="screen timer-screen"><div className="step-progress"><span>Bloque · {progress}% · Paso {current + 1} de {steps.length}</span><div><i style={{ width: `${progress}%` }} /></div></div>
+    <div className="step-runner"><p className="eyebrow">Tiempo restante total</p><div className="timer">{formatSeconds(totalSeconds)}</div><span className="step-number large">{current + 1}</span><p className="eyebrow">Paso actual · {step.duracion_minutos} min</p><h1>{step.titulo}</h1><p className="subtitle">{step.descripcion}</p><div className="expected-result"><span>Resultado esperado</span><strong>{step.resultado}</strong></div><p className="step-clock">Tiempo del paso: {formatSeconds(stepSeconds)}</p>
+      <div className="button-row center"><button className="primary-button large success" onClick={completeStep}><CheckCircle2 size={20} />Paso completado</button>{running ? <button className="secondary-button" onClick={() => setRunning(false)}><Pause size={18} />Pausar</button> : <button className="secondary-button" onClick={() => setRunning(true)}><Play size={18} />Reanudar</button>}<button className="danger-button" onClick={() => { setRunning(false); setShowAbandon(true); }}>Abandonar bloque</button><button className="ghost-button" onClick={onMenu}>Menú</button></div>
+    </div>
+    {showAbandon && <div className="modal-backdrop"><div className="modal" role="dialog" aria-modal="true"><AlertTriangle className="warn-icon" size={34} /><h2>Abandonar ahora también entrena identidad.</h2><p>¿Vas a abandonar o vas a reajustar?</p><div className="modal-actions"><button className="danger-button" onClick={() => onAbandon(stepsCompleted)}>Abandonar</button><button className="primary-button" onClick={() => { setShowAbandon(false); setRunning(true); }}>Reajustar</button></div></div></div>}
+  </section>;
+}
+
+function DeepWorkReview({ session, onPatch, onSave, onMenu }) {
+  return <section className="screen"><StepHeader icon={<CheckCircle2 />} title="Revisión final" text="Registra lo que ocurrió, no lo que querías que ocurriera." />
+    <label className="field"><span>¿Qué has completado realmente?</span><textarea autoFocus value={session.actualResult} onChange={(e) => onPatch({ actualResult: e.target.value })} /></label>
+    <label className="field"><span>¿Qué quedó pendiente? <small>Opcional</small></span><textarea value={session.pending} onChange={(e) => onPatch({ pending: e.target.value })} /></label>
+    <div className="field"><span>¿Te distrajiste?</span><div className="option-grid compact">{["No", "Sí, poco", "Sí, bastante"].map((item) => <button className={`option ${session.distracted === item ? "selected" : ""}`} key={item} onClick={() => onPatch({ distracted: item })}>{item}</button>)}</div></div>
+    <label className="field"><span>¿Qué te distrajo? <small>Opcional</small></span><input value={session.distractionReport} onChange={(e) => onPatch({ distractionReport: e.target.value })} /></label>
+    <div className="field"><span>¿El bloque fue exitoso?</span><div className="option-grid compact">{["Sí", "Parcial", "No"].map((item) => <button className={`option ${session.successLevel === item ? "selected" : ""}`} key={item} onClick={() => onPatch({ successLevel: item })}>{item}</button>)}</div></div>
+    <div className="button-row"><button className="primary-button large" disabled={!session.actualResult.trim()} onClick={onSave}>Guardar bloque</button><button className="secondary-button" onClick={onMenu}>Menú</button></div>
+  </section>;
+}
+
+function DeepWorkSummary({ session, onStart, onMenu, onStats }) {
+  const message = session.abandoned ? "Abandonaste el bloque. Queda registrado. La próxima vez reduce antes de escapar." : session.successLevel === "Sí" ? "Bloque completado. Hoy entrenaste foco real." : "No fue perfecto, pero hubo ejecución. Ajusta y sigue.";
+  return <section className="screen"><StepHeader icon={session.abandoned ? <XCircle /> : <CheckCircle2 />} title={session.abandoned ? "Bloque abandonado" : "Bloque registrado"} text={message} />
+    <div className="summary-list"><SummaryRow label="Tarea trabajada" value={session.task} /><SummaryRow label="Objetivo inicial" value={session.desiredResult} /><SummaryRow label="Objetivo reformulado" value={session.analysis?.objetivo_reformulado} /><SummaryRow label="Duración elegida" value={`${session.durationMinutes} minutos`} /><SummaryRow label="Pasos completados" value={`${session.stepsCompleted} de ${session.analysis?.pasos?.length || 0}`} /><SummaryRow label="Resultado real" value={session.actualResult} /><SummaryRow label="Distracción detectada" value={session.distractionReport || session.distractions?.join(", ")} /><SummaryRow label="Éxito" value={session.abandoned ? "No — abandono" : session.successLevel} /></div>
+    <blockquote>{message}</blockquote><div className="button-row"><button className="primary-button" onClick={onStart}>Hacer otro bloque</button><button className="secondary-button" onClick={onMenu}>Menú</button><button className="ghost-button" onClick={onStats}>Ver estadísticas</button></div>
+  </section>;
+}
+
+function formatSeconds(seconds) {
+  return `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
+}
+
 function Countdown({ minutes, running }) {
   const [seconds, setSeconds] = useState(minutes * 60);
   useEffect(() => setSeconds(minutes * 60), [minutes]);
@@ -803,10 +1065,12 @@ function Countdown({ minutes, running }) {
 
 function StatsScreen({ combined, onMenu }) {
   return <section className="screen"><StepHeader icon={<BarChart3 />} title="Estadísticas" text="Tu identidad medida en datos." />
-    <h2>Resumen combinado</h2><div className="metric-grid"><Metric label="Iniciados" value={combined.total} /><Metric label="Completados" value={combined.completed} /><Metric label="Abandonados" value={combined.failed} /><Metric label="Mejor racha" value={combined.bestStreak} /><Metric label="Fallos seguidos" value={combined.failStreak} /></div>
+    <h2>Resumen combinado</h2><div className="metric-grid"><Metric label="Total acciones de ejecución" value={combined.total} /><Metric label="Total completadas" value={combined.completed} /><Metric label="Total abandonadas" value={combined.failed} /><Metric label="Cumplimiento global" value={`${combined.compliance}%`} /><Metric label="Mejor racha" value={combined.bestStreak} /><Metric label="Fallos seguidos" value={combined.failStreak} /></div>
     <h2>Sistema Anticaída</h2><div className="metric-grid"><Metric label="Protocolos iniciados" value={combined.anti.total} /><Metric label="Completados" value={combined.anti.completed} /><Metric label="Abandonados" value={combined.anti.failed} /><Metric label="Mejor racha" value={combined.anti.bestCompletionStreak} /></div>
     <h2>Arranque 10</h2><div className="metric-grid"><Metric label="Arranques iniciados" value={combined.launch.total} /><Metric label="Completados" value={combined.launch.completed} /><Metric label="Abandonados" value={combined.launch.failed} /><Metric label="Mejor racha" value={combined.launch.bestCompletionStreak} /></div>
-    <h2>Últimos 5 registros</h2><div className="history">{combined.recent.length ? combined.recent.map((item) => <div className="history-row" key={item.id}><span>{new Date(item.date).toLocaleString("es-ES")}</span><strong>{item.completed ? "Completado" : "Abandonado"}</strong><span>{item.module === "launch10" ? `Arranque 10 — ${item.task}` : `Anticaída — ${item.problem}`}</span></div>) : <p className="empty-state">Sin registros todavía.</p>}</div>
+    <h2>Trabajo Profundo</h2><div className="metric-grid"><Metric label="Bloques iniciados" value={combined.deepWork.total} /><Metric label="Bloques completados" value={combined.deepWork.completed} /><Metric label="Bloques abandonados" value={combined.deepWork.failed} /><Metric label="Minutos trabajados" value={combined.deepWork.minutes} /><Metric label="Mejor racha" value={combined.deepWork.bestCompletionStreak} /><Metric label="Distracción más repetida" value={combined.deepWork.mostRepeatedDistraction || "—"} /><Metric label="Tarea más repetida" value={combined.deepWork.mostRepeatedTask || "—"} /></div>
+    <h2>Últimos 5 bloques de Trabajo Profundo</h2><div className="history">{combined.deepWork.recent.length ? combined.deepWork.recent.map((item) => <div className="history-row" key={item.id}><span>{new Date(item.date).toLocaleString("es-ES")}</span><strong>{item.abandoned ? "Abandonado" : item.successLevel || "Registrado"}</strong><span>{item.task}</span></div>) : <p className="empty-state">Sin bloques todavía.</p>}</div>
+    <h2>Últimos 5 registros</h2><div className="history">{combined.recent.length ? combined.recent.map((item) => <div className="history-row" key={`${item.module}-${item.id}`}><span>{new Date(item.date).toLocaleString("es-ES")}</span><strong>{item.completed ? "Completado" : "Abandonado"}</strong><span>{item.module === "launch10" ? `Arranque 10 — ${item.task}` : item.module === "deepwork" ? `Trabajo Profundo — ${item.task}` : `Anticaída — ${item.problem}`}</span></div>) : <p className="empty-state">Sin registros todavía.</p>}</div>
     <button className="secondary-button" onClick={onMenu}><ChevronLeft size={18} />Menú</button>
   </section>;
 }

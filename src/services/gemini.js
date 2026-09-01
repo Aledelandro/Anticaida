@@ -120,5 +120,18 @@ Datos: ${JSON.stringify(taskData)}`;
   }
 }
 
+export async function analyzeDeepWorkWithGemini(payload) {
+  const prompt = `Eres el cerebro del módulo “Trabajo Profundo” dentro de una app llamada “Modo Ejecución”. Prepara un bloque serio, enfocado y ejecutable. No eres motivador, no das teoría, no haces planes enormes, no abres nuevas tareas y no permites pensar de más. Convierte la tarea y el resultado deseado en pasos concretos con duración, resultado visible y reglas claras. Usa la memoria: abandonos, distracciones, tono, herramientas, fallos y tareas completadas.
+Reglas: el total debe acercarse a la duración elegida; cada paso dura entre 5 y 25 minutos; cada paso tiene resultado visible; el primero puede hacerse ahora; reduce tareas grandes; limita anuncios a campaña/copy/creativo, web a una sección, estudio a un tema/ejercicio y vídeo a hook/guion/grabación/edición; endurece el mensaje si hay abandonos; no insultes ni humilles.
+Devuelve SOLO JSON válido: {"diagnostico":"string","objetivo_reformulado":"string","regla_del_bloque":"string","pasos":[{"titulo":"string","descripcion":"string","duracion_minutos":10,"resultado":"string"}],"distracciones_a_bloquear":["string"],"mensaje_directo":"string","criterio_de_exito":"string","si_te_bloqueas":"string","tono":"normal | directo | duro | muy_duro"}.
+Datos: ${JSON.stringify(payload)}`;
+  try {
+    return await withTimeout(callGemini(prompt), 12000);
+  } catch (error) {
+    console.error("Gemini deep_work error:", error);
+    return null;
+  }
+}
+
 export const analyzeWithGemini = analyzeAntiFallWithGemini;
 export { callGemini, withTimeout };

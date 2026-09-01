@@ -254,14 +254,15 @@ async function getRecent(table, userId, limit = 5) {
 }
 
 export async function loadUserContext(userId) {
-  if (!supabase || !userId) return { profile: null, userMemory: [], antiFallSessions: [], launch10Sessions: [] };
-  const [profile, userMemory, antiFallSessions, launch10Sessions] = await Promise.all([
+  if (!supabase || !userId) return { profile: null, userMemory: [], antiFallSessions: [], launch10Sessions: [], deepWorkSessions: [] };
+  const [profile, userMemory, antiFallSessions, launch10Sessions, deepWorkSessions] = await Promise.all([
     getProfile(userId),
     getUserMemory(userId),
     getRecent("anti_fall_sessions", userId),
-    getRecent("launch10_sessions", userId)
+    getRecent("launch10_sessions", userId),
+    getRecent("deep_work_sessions", userId)
   ]);
-  return { profile, userMemory, antiFallSessions, launch10Sessions };
+  return { profile, userMemory, antiFallSessions, launch10Sessions, deepWorkSessions };
 }
 
 export async function saveAntiFallSession(antiFallData) {
@@ -359,6 +360,53 @@ export async function updateLaunch10Session(sessionId, values) {
     throw error;
   }
   return data;
+}
+
+export async function saveDeepWorkSession(deepWorkData) {
+  if (!supabase) throw new Error(supabaseConfigurationError || "Supabase no está configurado.");
+  const { data: { user }, error: userError } = await supabase.auth.getUser();
+  if (userError) throw userError;
+  if (!user) throw new Error("No hay sesión activa. Vuelve a iniciar sesión.");
+  const payload = cleanUndefined({
+    user_id: user.id,
+    task: deepWorkData.task || "",
+    desired_result: deepWorkData.desiredResult || "",
+    duration_minutes: Number(deepWorkData.durationMinutes || 45),
+    distractions: deepWorkData.distractions || [],
+    ai_plan: deepWorkData.analysis || {},
+    completed: Boolean(deepWorkData.completed),
+    abandoned: Boolean(deepWorkData.abandoned),
+    success_level: deepWorkData.successLevel || null,
+    actual_result: deepWorkData.actualResult || "",
+    pending: deepWorkData.pending || "",
+    distraction_report: [deepWorkData.distracted, deepWorkData.distractionReport].filter(Boolean).join(" — "),
+    steps_completed: Number(deepWorkData.stepsCompleted || 0)
+  });
+  const { data, error } = await supabase.from("deep_work_sessions").insert(payload).select().single();
+  if (error) {
+    console.error("Error guardando deep_work_sessions:", error);
+    console.error("Payload deep_work_sessions:", payload);
+    throw error;
+  }
+  return data;
+}
+
+export async function updateDeepWorkMemory(userId, session) {
+  if (!supabase || !userId) return;
+  const memories = [
+    ["deep_work", "last_session", { task: session.task, duration_minutes: session.durationMinutes, success: session.successLevel, abandoned: session.abandoned }],
+    ["work_style", "deep_work_duration", { value: session.completed ? session.durationMinutes : null, successful: Boolean(session.completed) }],
+    ["patterns", "deep_work_outcome", { task: session.task, success: session.successLevel, abandoned: session.abandoned }]
+  ];
+  if (session.distractionReport || session.distractions?.length) memories.push([
+    "distractions", "deep_work_latest", { selected: session.distractions || [], reported: session.distractionReport || "" }
+  ]);
+  for (const [category, memory_key, memory_value] of memories) {
+    const { error } = await supabase.from("user_memory").upsert({
+      user_id: userId, category, memory_key, memory_value, updated_at: new Date().toISOString()
+    }, { onConflict: "user_id,category,memory_key" });
+    if (error) throw memoryTableError(error);
+  }
 }
 
 function cleanUndefined(payload) {
