@@ -8,13 +8,19 @@ export function normalizeSupabaseUrl(value) {
 }
 
 const supabaseUrl = normalizeSupabaseUrl(import.meta.env.VITE_SUPABASE_URL);
+const missingSupabaseVariables = [
+  !supabaseUrl && "VITE_SUPABASE_URL",
+  !import.meta.env.VITE_SUPABASE_ANON_KEY && "VITE_SUPABASE_ANON_KEY"
+].filter(Boolean);
 
-export const isSupabaseConfigured = Boolean(
-  supabaseUrl && import.meta.env.VITE_SUPABASE_ANON_KEY
-);
+export const supabaseConfigurationError = missingSupabaseVariables.length
+  ? `Faltan variables de Supabase: ${missingSupabaseVariables.join(", ")}.`
+  : "";
+
+export const isSupabaseConfigured = !supabaseConfigurationError;
 
 export const supabase = isSupabaseConfigured
-  ? createClient(supabaseUrl, import.meta.env.VITE_SUPABASE_ANON_KEY, {
+  ? createClient(normalizeSupabaseUrl(import.meta.env.VITE_SUPABASE_URL), import.meta.env.VITE_SUPABASE_ANON_KEY, {
       auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true }
     })
   : null;
@@ -26,12 +32,21 @@ export async function getProfile(userId) {
   return data;
 }
 
-export async function createProfile(user) {
+export async function ensureUserProfile(user) {
   if (!supabase || !user) return null;
-  const profile = { id: user.id, email: user.email, onboarding_completed: false };
-  const { data, error } = await supabase.from("profiles").upsert(profile, { onConflict: "id" }).select().single();
-  if (error) throw error;
-  return data;
+  const existingProfile = await getProfile(user.id);
+  if (existingProfile) return existingProfile;
+
+  const profile = {
+    id: user.id,
+    email: user.email,
+    onboarding_completed: false,
+    tone_preference: "directo"
+  };
+  const { data, error } = await supabase.from("profiles").insert(profile).select().single();
+  if (!error) return data;
+  if (error.code === "23505") return getProfile(user.id);
+  throw error;
 }
 
 export async function updateProfile(userId, values) {
@@ -49,22 +64,26 @@ export async function saveOnboarding(userId, answers) {
     .select("id")
     .eq("user_id", userId)
     .maybeSingle();
-  if (readAnswersError) throw readAnswersError;
+  if (readAnswersError) throw onboardingTableError(readAnswersError);
   const answersQuery = existingAnswers
     ? supabase.from("onboarding_answers").update({ answers }).eq("id", existingAnswers.id)
     : supabase.from("onboarding_answers").insert({ user_id: userId, answers });
   const { error: answersError } = await answersQuery;
-  if (answersError) throw answersError;
+  if (answersError) throw onboardingTableError(answersError);
 
   const memories = [
-    ["main_goal", answers.main_goal],
-    ["main_obstacle", answers.main_obstacle],
-    ["motivation", answers.motivation],
-    ["preferred_tone", answers.preferred_tone]
-  ].filter(([, content]) => String(content || "").trim()).map(([memory_type, content]) => ({
+    ["profile", "display_name", answers.name],
+    ["goals", "main_goal", answers.main_goal],
+    ["goals", "motivation", answers.motivation],
+    ["work_style", "preferred_work_style", answers.work_style],
+    ["distractions", "main_distraction", answers.main_distraction],
+    ["tone", "tone_preference", answers.tone_preference],
+    ["tools", "preferred_tools", answers.tools]
+  ].filter(([, , value]) => String(value || "").trim()).map(([category, memory_key, value]) => ({
     user_id: userId,
-    memory_type,
-    content: String(content).trim()
+    category,
+    memory_key,
+    memory_value: { value: String(value).trim() }
   }));
 
   if (memories.length) {
@@ -73,22 +92,42 @@ export async function saveOnboarding(userId, answers) {
         .from("user_memory")
         .select("id")
         .eq("user_id", userId)
-        .eq("memory_type", memory.memory_type)
+        .eq("category", memory.category)
+        .eq("memory_key", memory.memory_key)
         .maybeSingle();
-      if (readMemoryError) throw readMemoryError;
+      if (readMemoryError) throw memoryTableError(readMemoryError);
       const memoryQuery = existingMemory
-        ? supabase.from("user_memory").update({ content: memory.content }).eq("id", existingMemory.id)
+        ? supabase.from("user_memory").update({ memory_value: memory.memory_value }).eq("id", existingMemory.id)
         : supabase.from("user_memory").insert(memory);
       const { error: memoryError } = await memoryQuery;
-      if (memoryError) throw memoryError;
+      if (memoryError) throw memoryTableError(memoryError);
     }
   }
 
   return updateProfile(userId, {
     name: String(answers.name || "").trim(),
-    preferred_tone: answers.preferred_tone,
+    tone_preference: answers.tone_preference,
     onboarding_completed: true
   });
+}
+
+function isMissingTable(error, table) {
+  const message = `${error?.message || ""} ${error?.details || ""}`.toLowerCase();
+  return error?.code === "PGRST205" || (message.includes(table.toLowerCase()) && message.includes("schema cache"));
+}
+
+function onboardingTableError(error) {
+  if (!isMissingTable(error, "onboarding_answers")) return error;
+  const friendlyError = new Error("Falta crear la tabla onboarding_answers en Supabase.");
+  friendlyError.code = "MISSING_ONBOARDING_ANSWERS";
+  return friendlyError;
+}
+
+function memoryTableError(error) {
+  if (!isMissingTable(error, "user_memory")) return error;
+  const friendlyError = new Error("Falta crear la tabla user_memory en Supabase.");
+  friendlyError.code = "MISSING_USER_MEMORY";
+  return friendlyError;
 }
 
 export async function getUserMemory(userId) {

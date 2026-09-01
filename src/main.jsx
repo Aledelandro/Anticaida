@@ -10,8 +10,8 @@ import {
   saveLaunch, saveProtocol, updateActiveProtocol, updateLatestLaunch
 } from "./services/storage";
 import {
-  createProfile, getProfile, isSupabaseConfigured, loadUserContext, saveAntiFallSession,
-  saveLaunch10Session, saveOnboarding, supabase, updateLaunch10Session, updateProfile
+  ensureUserProfile, isSupabaseConfigured, loadUserContext, saveAntiFallSession,
+  saveLaunch10Session, saveOnboarding, supabase, supabaseConfigurationError, updateLaunch10Session, updateProfile
 } from "./services/supabase";
 
 const initialProtocol = {
@@ -83,8 +83,7 @@ function App() {
     let active = true;
     async function hydrate() {
       try {
-        let nextProfile = await getProfile(session.user.id);
-        if (!nextProfile) nextProfile = await createProfile(session.user);
+        const nextProfile = await ensureUserProfile(session.user);
         if (!active) return;
         setProfile(nextProfile);
         const context = await loadUserContext(session.user.id);
@@ -286,7 +285,7 @@ function App() {
   }
 
   if (authLoading) return <AppLoading text="Comprobando sesión…" />;
-  if (!isSupabaseConfigured) return <AppLoading text="Faltan VITE_SUPABASE_URL y VITE_SUPABASE_ANON_KEY." />;
+  if (!isSupabaseConfigured) return <AppLoading text={supabaseConfigurationError} />;
   if (!session) return <AuthScreen />;
   if (!profile) return <AppLoading text="Cargando tu perfil…" />;
   if (!profile.onboarding_completed) return <OnboardingScreen user={session.user} profile={profile} onComplete={setProfile} />;
@@ -353,15 +352,22 @@ function AuthScreen() {
         const { error } = await supabase.auth.signInWithPassword({ email, password });
         if (error) throw error;
       } else {
-        const { data, error } = await supabase.auth.signUp({ email, password });
+        const redirectTo = `${window.location.origin}/`;
+        const { data, error } = await supabase.auth.signUp({
+          email,
+          password,
+          options: { emailRedirectTo: redirectTo }
+        });
         if (error) throw error;
-        if (data.user) {
-          try { await createProfile(data.user); } catch { /* Puede existir un trigger de creación de perfil. */ }
+        if (data.session?.user) {
+          await ensureUserProfile(data.session.user);
+          setMessage("Cuenta creada. Vamos a configurar tu sistema.");
+        } else {
+          setMessage("Cuenta creada. Revisa tu correo para confirmar.");
         }
-        if (!data.session) setMessage("Cuenta creada. Revisa tu email para confirmar el acceso.");
       }
     } catch (error) {
-      setMessage(error?.message || "No se pudo completar el acceso.");
+      setMessage(getSpanishAuthError(error));
     } finally {
       setBusy(false);
     }
@@ -379,17 +385,30 @@ function AuthScreen() {
   </section></div></main>;
 }
 
+function getSpanishAuthError(error) {
+  const code = error?.code || "";
+  const message = String(error?.message || "").toLowerCase();
+  if (code === "invalid_credentials" || message.includes("invalid login credentials")) return "Email o contraseña incorrectos.";
+  if (code === "email_not_confirmed" || message.includes("email not confirmed")) return "Debes confirmar tu correo antes de iniciar sesión.";
+  if (code === "user_already_exists" || message.includes("already registered")) return "Ya existe una cuenta con este email.";
+  if (code === "weak_password" || message.includes("password")) return "La contraseña no cumple los requisitos de seguridad.";
+  if (message.includes("rate limit")) return "Demasiados intentos. Espera un momento y vuelve a probar.";
+  return "No se pudo completar el acceso. Inténtalo de nuevo.";
+}
+
 const onboardingQuestions = [
   { id: "name", title: "¿Cómo quieres que te llamemos?", type: "text", placeholder: "Tu nombre" },
   { id: "main_goal", title: "¿Cuál es tu objetivo principal ahora?", type: "textarea", placeholder: "El resultado que quieres conseguir" },
-  { id: "main_obstacle", title: "¿Qué patrón te frena más?", type: "textarea", placeholder: "Procrastinación, dudas, abandono…" },
   { id: "motivation", title: "¿Por qué es importante cambiarlo?", type: "textarea", placeholder: "La razón que no quieres olvidar" },
-  { id: "preferred_tone", title: "¿Qué tono prefieres cuando te bloqueas?", type: "choice", options: [["normal", "Normal"], ["directo", "Directo"], ["duro", "Duro"], ["muy_duro", "Muy duro"]] }
+  { id: "work_style", title: "¿Cómo trabajas mejor?", type: "choice", options: [["bloques_cortos", "Bloques cortos"], ["bloques_largos", "Bloques largos"], ["paso_a_paso", "Paso a paso"], ["con_presion", "Con presión"]] },
+  { id: "main_distraction", title: "¿Cuál es tu principal distracción?", type: "textarea", placeholder: "Juegos, redes, móvil, perfeccionismo…" },
+  { id: "tools", title: "¿Qué herramientas usas para trabajar?", type: "textarea", placeholder: "Shopify, Notion, Meta Ads, cuaderno…" },
+  { id: "tone_preference", title: "¿Qué tono prefieres cuando te bloqueas?", type: "choice", options: [["normal", "Normal"], ["directo", "Directo"], ["duro", "Duro"], ["muy_duro", "Muy duro"]] }
 ];
 
 function OnboardingScreen({ user, profile, onComplete }) {
   const [step, setStep] = useState(0);
-  const [answers, setAnswers] = useState({ name: profile.name || "", preferred_tone: profile.preferred_tone || "directo" });
+  const [answers, setAnswers] = useState({ name: profile.name || "", tone_preference: profile.tone_preference || "directo" });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const question = onboardingQuestions[step];
@@ -423,7 +442,7 @@ function OnboardingScreen({ user, profile, onComplete }) {
 
 function ProfileScreen({ user, profile, onProfile, onMenu }) {
   const [name, setName] = useState(profile.name || "");
-  const [tone, setTone] = useState(profile.preferred_tone || "directo");
+  const [tone, setTone] = useState(profile.tone_preference || "directo");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
 
@@ -432,7 +451,7 @@ function ProfileScreen({ user, profile, onProfile, onMenu }) {
     setBusy(true);
     setMessage("");
     try {
-      const next = await updateProfile(user.id, { name: name.trim(), preferred_tone: tone });
+      const next = await updateProfile(user.id, { name: name.trim(), tone_preference: tone });
       onProfile(next);
       setMessage("Perfil actualizado.");
     } catch (error) {
