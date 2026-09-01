@@ -10,7 +10,7 @@ import {
   saveLaunch, saveProtocol, updateActiveProtocol, updateLatestLaunch
 } from "./services/storage";
 import {
-  ensureUserProfile, isSupabaseConfigured, loadUserContext, saveAntiFallSession,
+  debugSupabaseConnection, ensureUserProfile, isSupabaseConfigured, loadUserContext, saveAntiFallSession,
   saveLaunch10Session, saveOnboarding, supabase, supabaseConfigurationError, updateLaunch10Session, updateProfile
 } from "./services/supabase";
 
@@ -79,6 +79,11 @@ function App() {
   }, []);
 
   useEffect(() => {
+    if (authLoading || !supabase) return;
+    debugSupabaseConnection().catch((error) => console.error("Supabase connection debug error:", error));
+  }, [authLoading, session?.user?.id]);
+
+  useEffect(() => {
     if (!session?.user) return;
     let active = true;
     async function hydrate() {
@@ -91,9 +96,10 @@ function App() {
         setAntiHistory(context.antiFallSessions.map(normalizeAntiSession));
         setLaunchHistory(context.launch10Sessions.map(normalizeLaunchSession));
         setDataMessage("");
-      } catch {
+      } catch (error) {
         if (!active) return;
-        setDataMessage("Supabase no respondió. Se está usando el respaldo local.");
+        console.error("Supabase hydration error:", error);
+        setDataMessage(error?.message || "No se pudo cargar la información de Supabase.");
         if (markActiveFailureIfNeeded()) setAntiHistory(readHistory());
         setProfile((current) => current || {
           id: session.user.id, email: session.user.email, onboarding_completed: false
@@ -288,7 +294,7 @@ function App() {
   if (!isSupabaseConfigured) return <AppLoading text={supabaseConfigurationError} />;
   if (!session) return <AuthScreen />;
   if (!profile) return <AppLoading text="Cargando tu perfil…" />;
-  if (!profile.onboarding_completed) return <OnboardingScreen user={session.user} profile={profile} onComplete={setProfile} />;
+  if (!profile.onboarding_completed) return <OnboardingScreen profile={profile} onComplete={setProfile} />;
 
   return (
     <main className="app"><div className="shell">
@@ -406,7 +412,7 @@ const onboardingQuestions = [
   { id: "tone_preference", title: "¿Qué tono prefieres cuando te bloqueas?", type: "choice", options: [["normal", "Normal"], ["directo", "Directo"], ["duro", "Duro"], ["muy_duro", "Muy duro"]] }
 ];
 
-function OnboardingScreen({ user, profile, onComplete }) {
+function OnboardingScreen({ profile, onComplete }) {
   const [step, setStep] = useState(0);
   const [answers, setAnswers] = useState({ name: profile.name || "", tone_preference: profile.tone_preference || "directo" });
   const [busy, setBusy] = useState(false);
@@ -422,9 +428,10 @@ function OnboardingScreen({ user, profile, onComplete }) {
     setBusy(true);
     setError("");
     try {
-      const nextProfile = await saveOnboarding(user.id, answers);
+      const nextProfile = await saveOnboarding(answers, onboardingQuestions);
       onComplete(nextProfile);
     } catch (saveError) {
+      console.error("Supabase onboarding save error:", saveError);
       setError(saveError?.message || "No se pudo guardar el onboarding.");
     } finally {
       setBusy(false);
