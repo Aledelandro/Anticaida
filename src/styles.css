@@ -474,6 +474,113 @@ select:focus {
   color: #ffb0b0;
 }
 
+.ai-loading-screen {
+  width: min(760px, 100%);
+  min-height: 62vh;
+  margin: 0 auto;
+  align-content: center;
+  gap: 30px;
+}
+
+.ai-loading-heading {
+  display: grid;
+  grid-template-columns: 54px 1fr;
+  align-items: start;
+  gap: 20px;
+}
+
+.ai-loading-heading > div:last-child {
+  display: grid;
+  gap: 12px;
+}
+
+.ai-loading-heading h1 {
+  font-size: clamp(2rem, 5vw, 3.7rem);
+  line-height: 1;
+}
+
+.ai-spinner {
+  width: 48px;
+  height: 48px;
+  border: 2px solid #303642;
+  border-top-color: #ffffff;
+  border-radius: 50%;
+  animation: ai-spin 850ms linear infinite;
+}
+
+.ai-progress {
+  height: 4px;
+  overflow: hidden;
+  border-radius: 99px;
+  background: #242832;
+}
+
+.ai-progress i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: #ffffff;
+  transition: width 500ms ease;
+}
+
+.ai-loading-steps {
+  display: grid;
+  overflow: hidden;
+  border: 1px solid #2d3340;
+  border-radius: 8px;
+  background: #181b22;
+}
+
+.ai-loading-step {
+  display: grid;
+  grid-template-columns: 30px 1fr;
+  align-items: center;
+  gap: 12px;
+  min-height: 58px;
+  padding: 12px 18px;
+  border-bottom: 1px solid #2d3340;
+  color: #696f7a;
+  font-weight: 750;
+  transition: color 250ms ease, background 250ms ease;
+}
+
+.ai-loading-step:last-child {
+  border-bottom: 0;
+}
+
+.ai-loading-step.active {
+  background: #20242c;
+  color: #ffffff;
+}
+
+.ai-loading-step.done {
+  color: #b5f3c5;
+}
+
+.ai-step-status {
+  display: grid;
+  place-items: center;
+}
+
+.ai-step-status i {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #3d424d;
+}
+
+.ai-loading-step.active .ai-step-status i {
+  background: #ffffff;
+  box-shadow: 0 0 0 6px rgba(255, 255, 255, 0.08);
+  animation: ai-pulse 1.2s ease-in-out infinite;
+}
+
+.ai-loading-note {
+  color: #858b96;
+  font-size: 0.92rem;
+  text-align: center;
+}
+
 .action-panel {
   display: grid;
   gap: 18px;
@@ -951,6 +1058,18 @@ blockquote {
   }
 }
 
+@keyframes ai-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes ai-pulse {
+  50% {
+    opacity: 0.45;
+  }
+}
+
 @media (max-width: 760px) {
   .app {
     padding: 18px;
@@ -965,6 +1084,10 @@ blockquote {
 
   .top-actions {
     justify-content: flex-start;
+  }
+
+  .ai-loading-heading {
+    grid-template-columns: 1fr;
   }
 
   .metric-row,

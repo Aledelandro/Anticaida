@@ -264,54 +264,106 @@ export async function loadUserContext(userId) {
   return { profile, userMemory, antiFallSessions, launch10Sessions };
 }
 
-export async function saveAntiFallSession(userId, record) {
-  if (!supabase || !userId) return null;
-  const row = {
-    user_id: userId,
-    problem_id: record.problemId,
-    problem: record.problem,
-    details: record.details,
-    reset_action: record.reset,
-    emotion: record.emotion,
-    avoided_task: record.avoidedTask,
-    consequence: record.consequence,
-    minimal_action: record.minimalAction,
-    shield: record.shield,
-    completed: record.completed,
-    analysis: record.analysis,
-    started_at: record.date,
-    ended_at: record.endedAt
-  };
-  const { data, error } = await supabase.from("anti_fall_sessions").insert(row).select().single();
-  if (error) throw error;
+export async function saveAntiFallSession(antiFallData) {
+  if (!supabase) {
+    const configurationError = new Error(supabaseConfigurationError || "Supabase no está configurado.");
+    console.error("Error guardando anti_fall_sessions:", configurationError);
+    throw configurationError;
+  }
+
+  const { data: { user }, error: userError } = await supabase.auth.getUser();
+  if (!user) {
+    const sessionError = new Error("No hay sesión activa. Vuelve a iniciar sesión.");
+    if (userError) console.error("Error obteniendo sesión para anti_fall_sessions:", userError);
+    console.error("Error guardando anti_fall_sessions:", sessionError);
+    throw sessionError;
+  }
+  if (userError) {
+    console.error("Error obteniendo sesión para anti_fall_sessions:", userError);
+    throw userError;
+  }
+
+  const payload = cleanUndefined({
+    user_id: user.id,
+    problem: antiFallData.problem || "",
+    details: antiFallData.details || "",
+    emotion: antiFallData.emotion || "",
+    avoided_task: antiFallData.avoidedTask || antiFallData.avoided_task || "",
+    minimal_action: antiFallData.minimalAction || antiFallData.minimal_action || "",
+    shield: antiFallData.shield || "",
+    completed: Boolean(antiFallData.completed),
+    abandoned: Boolean(antiFallData.abandoned),
+    failure_streak: Number(antiFallData.failureStreak ?? antiFallData.failure_streak ?? 0),
+    ai_result: antiFallData.aiResult || antiFallData.ai_result || {}
+  });
+
+  const { data, error } = await supabase.from("anti_fall_sessions").insert(payload).select().single();
+  if (error) {
+    console.error("Error guardando anti_fall_sessions:", error);
+    console.error("Payload anti_fall_sessions:", payload);
+    throw error;
+  }
   return data;
 }
 
-export async function saveLaunch10Session(userId, record) {
-  if (!supabase || !userId) return null;
-  const row = {
-    user_id: userId,
-    task: record.task,
-    desired_result: record.desiredResult,
-    blockage: record.blockage,
-    excuse: record.excuse,
-    questionnaire: record.questionnaire,
-    answers: record.answers,
-    plan: record.analysis,
-    duration: record.duration,
-    actual_result: record.actualResult,
-    completed: record.completed,
-    started_at: record.date,
-    ended_at: record.endedAt
-  };
-  const { data, error } = await supabase.from("launch10_sessions").insert(row).select().single();
-  if (error) throw error;
+export async function saveLaunch10Session(launchData) {
+  if (!supabase) {
+    const configurationError = new Error(supabaseConfigurationError || "Supabase no está configurado.");
+    console.error("Error guardando launch10_sessions:", configurationError);
+    throw configurationError;
+  }
+
+  const { data: { user }, error: userError } = await supabase.auth.getUser();
+  if (!user) {
+    const sessionError = new Error("No hay sesión activa. Vuelve a iniciar sesión.");
+    if (userError) console.error("Error obteniendo sesión para launch10_sessions:", userError);
+    console.error("Error guardando launch10_sessions:", sessionError);
+    throw sessionError;
+  }
+  if (userError) {
+    console.error("Error obteniendo sesión para launch10_sessions:", userError);
+    throw userError;
+  }
+
+  const payload = cleanUndefined({
+    user_id: user.id,
+    task: launchData.task || "",
+    desired_result: launchData.desiredResult || launchData.desired_result || "",
+    blockage: launchData.blockage || "",
+    excuse: launchData.excuse || "",
+    questionnaire_answers: launchData.questionnaireAnswers || launchData.questionnaire_answers || {},
+    plan: launchData.plan || {},
+    completed: Boolean(launchData.completed),
+    abandoned: Boolean(launchData.abandoned),
+    result_text: launchData.resultText || launchData.result_text || ""
+  });
+
+  const { data, error } = await supabase.from("launch10_sessions").insert(payload).select().single();
+  if (error) {
+    console.error("Error guardando launch10_sessions:", error);
+    console.error("Payload launch10_sessions:", payload);
+    throw error;
+  }
   return data;
 }
 
 export async function updateLaunch10Session(sessionId, values) {
   if (!supabase || !sessionId) return null;
-  const { data, error } = await supabase.from("launch10_sessions").update(values).eq("id", sessionId).select().single();
-  if (error) throw error;
+  const payload = cleanUndefined({
+    result_text: values.resultText || values.result_text || ""
+  });
+  const { data, error } = await supabase.from("launch10_sessions").update(payload).eq("id", sessionId).select().single();
+  if (error) {
+    console.error("Error actualizando launch10_sessions:", error);
+    console.error("Payload launch10_sessions:", payload);
+    throw error;
+  }
   return data;
+}
+
+function cleanUndefined(payload) {
+  Object.keys(payload).forEach((key) => {
+    if (payload[key] === undefined) payload[key] = null;
+  });
+  return payload;
 }

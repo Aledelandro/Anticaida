@@ -53,6 +53,7 @@ export function createProtocolRecord(protocol) {
     reset: protocol.reset || "", emotion: protocol.emotion === "Otro" ? protocol.customEmotion : protocol.emotion,
     avoidedTask: protocol.avoidedTask || "", consequence: protocol.consequence || "",
     minimalAction: protocol.action || "", completed: Boolean(protocol.completed),
+    abandoned: protocol.abandoned ?? !Boolean(protocol.completed),
     shield: protocol.shield === "Otro ajuste personalizado." ? protocol.customShield : protocol.shield,
     analysis: protocol.analysis || null
   };
@@ -69,7 +70,7 @@ export function createLaunchRecord(launch) {
   return {
     ...launch, id: crypto.randomUUID(), module: "launch10",
     date: launch.startedAt || new Date().toISOString(), endedAt: launch.endedAt || new Date().toISOString(),
-    completed: Boolean(launch.completed)
+    completed: Boolean(launch.completed), abandoned: launch.abandoned ?? !Boolean(launch.completed)
   };
 }
 

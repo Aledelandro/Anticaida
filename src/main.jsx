@@ -51,6 +51,7 @@ function App() {
   const [antiHistory, setAntiHistory] = useState(() => readHistory());
   const [launchHistory, setLaunchHistory] = useState(() => readLaunchHistory());
   const [loading, setLoading] = useState(false);
+  const [aiFallbackMessage, setAiFallbackMessage] = useState("");
 
   const antiStats = useMemo(() => getStats(antiHistory), [antiHistory]);
   const launchStats = useMemo(() => getLaunchStats(launchHistory), [launchHistory]);
@@ -135,6 +136,7 @@ function App() {
   }
 
   function openModule(module) {
+    setAiFallbackMessage("");
     setCurrentModule(module);
     if (module === "antifall") setAntiStep("home");
     if (module === "launch10") setLaunchStep("home");
@@ -143,14 +145,18 @@ function App() {
   async function persistAnti(finished) {
     const record = createProtocolRecord(finished);
     try {
-      const remote = await saveAntiFallSession(session.user.id, record);
+      const remote = await saveAntiFallSession({
+        ...record,
+        failureStreak: problemStats.failStreak,
+        aiResult: record.analysis
+      });
       const saved = { ...record, id: remote?.id || record.id };
       setAntiHistory((history) => [saved, ...history]);
       return saved;
-    } catch {
+    } catch (error) {
       const saved = saveProtocol(finished);
       setAntiHistory(readHistory());
-      setDataMessage("No se pudo guardar en Supabase. La sesión quedó respaldada localmente.");
+      setDataMessage(`No se pudo guardar en Supabase: ${error?.message || "Error desconocido"}. La sesión quedó respaldada localmente.`);
       return saved;
     }
   }
@@ -158,14 +164,19 @@ function App() {
   async function persistLaunch(finished) {
     const record = createLaunchRecord(finished);
     try {
-      const remote = await saveLaunch10Session(session.user.id, record);
+      const remote = await saveLaunch10Session({
+        ...record,
+        questionnaireAnswers: record.answers,
+        plan: record.analysis,
+        resultText: record.actualResult
+      });
       const saved = { ...record, id: remote?.id || record.id, remoteSessionId: remote?.id };
       setLaunchHistory((history) => [saved, ...history]);
       return saved;
-    } catch {
+    } catch (error) {
       const saved = saveLaunch(finished);
       setLaunchHistory(readLaunchHistory());
-      setDataMessage("No se pudo guardar en Supabase. La sesión quedó respaldada localmente.");
+      setDataMessage(`No se pudo guardar en Supabase: ${error?.message || "Error desconocido"}. La sesión quedó respaldada localmente.`);
       return saved;
     }
   }
@@ -196,6 +207,7 @@ function App() {
   }
 
   function startAntiFall() {
+    setAiFallbackMessage("");
     const fresh = { ...initialProtocol, startedAt: new Date().toISOString() };
     recordProtocolStarted("antifall");
     setProtocol(fresh);
@@ -207,22 +219,32 @@ function App() {
     const local = fallbackAnalysis({ protocol, stats: problemStats, firmness, config });
     patchProtocol({ analysis: local, action: local.accion_minima });
     setAntiStep("reset");
+    setAiFallbackMessage("");
     setLoading(true);
-    const userContext = await getGeminiContext();
-    const result = await analyzeAntiFallWithGemini({ ...buildGeminiPayload({ protocol, stats: problemStats, config }), userContext });
-    if (result) patchProtocol({ analysis: { ...local, ...result }, action: result.accion_minima || local.accion_minima });
-    setLoading(false);
+    try {
+      const userContext = await getGeminiContext();
+      const result = await analyzeAntiFallWithGemini({ ...buildGeminiPayload({ protocol, stats: problemStats, config }), userContext });
+      if (result?.accion_minima || result?.reset_fisico) patchProtocol({ analysis: { ...local, ...result }, action: result.accion_minima || local.accion_minima });
+      else setAiFallbackMessage("La IA tardó demasiado. He preparado un protocolo local para que sigas ejecutando.");
+    } finally {
+      setLoading(false);
+    }
   }
 
   async function generateAntiAction() {
     const local = fallbackAnalysis({ protocol, stats: problemStats, firmness, config });
     patchProtocol({ analysis: local, action: local.accion_minima });
     setAntiStep("action");
+    setAiFallbackMessage("");
     setLoading(true);
-    const userContext = await getGeminiContext();
-    const result = await analyzeAntiFallWithGemini({ ...buildGeminiPayload({ protocol, stats: problemStats, config }), userContext });
-    if (result) patchProtocol({ analysis: { ...local, ...result }, action: result.accion_minima || local.accion_minima });
-    setLoading(false);
+    try {
+      const userContext = await getGeminiContext();
+      const result = await analyzeAntiFallWithGemini({ ...buildGeminiPayload({ protocol, stats: problemStats, config }), userContext });
+      if (result?.accion_minima) patchProtocol({ analysis: { ...local, ...result }, action: result.accion_minima });
+      else setAiFallbackMessage("La IA tardó demasiado. He preparado un protocolo local para que sigas ejecutando.");
+    } finally {
+      setLoading(false);
+    }
   }
 
   async function finishAntiFall() {
@@ -233,6 +255,7 @@ function App() {
   }
 
   function startLaunch() {
+    setAiFallbackMessage("");
     recordProtocolStarted("launch10");
     setLaunch({ ...initialLaunch, startedAt: new Date().toISOString() });
     setLaunchStep("task");
@@ -242,36 +265,47 @@ function App() {
     const local = getLocalLaunchQuestionnaire(launch.task, effectiveBlockage(launch));
     patchLaunch({ questionnaire: local, answers: {} });
     setLaunchStep("questionnaire");
+    setAiFallbackMessage("");
     setLoading(true);
-    const userContext = await getGeminiContext();
-    const result = await generateLaunchQuestionnaireWithGemini({
-      task: launch.task, desiredResult: launch.desiredResult, blockage: effectiveBlockage(launch), excuse: launch.excuse,
-      userContext
-    });
-    patchLaunch({ questionnaire: normalizeQuestionnaire(result, local) });
-    setLoading(false);
+    try {
+      const userContext = await getGeminiContext();
+      const result = await generateLaunchQuestionnaireWithGemini({
+        task: launch.task, desiredResult: launch.desiredResult, blockage: effectiveBlockage(launch), excuse: launch.excuse,
+        userContext
+      });
+      const questionnaire = normalizeQuestionnaire(result, local);
+      patchLaunch({ questionnaire });
+      if (questionnaire === local) setAiFallbackMessage("La IA tardó demasiado. He preparado un protocolo local para que sigas ejecutando.");
+    } finally {
+      setLoading(false);
+    }
   }
 
   async function generateLaunchAction() {
     const local = getLocalLaunchPlan(launch.task, effectiveBlockage(launch), launch.answers, launchStats);
     patchLaunch({ analysis: local, duration: local.duracion_recomendada });
     setLaunchStep("action");
+    setAiFallbackMessage("");
     setLoading(true);
-    const userContext = await getGeminiContext();
-    const result = await analyzeLaunchWithGemini({
-      tarea: launch.task, resultado_deseado: launch.desiredResult, bloqueo: effectiveBlockage(launch), excusa: launch.excuse,
-      respuestas_cuestionario: launch.answers, preguntas: launch.questionnaire?.questions,
-      historial: { total: launchStats.total, completados: launchStats.completed, abandonados: launchStats.failed },
-      racha_abandonos: launchStats.failStreak, racha_completados: launchStats.completionStreak,
-      ultimos_5: launchHistory.slice(0, 5), userContext
-    });
-    const plan = normalizeLaunchPlan(result, local);
-    patchLaunch({ analysis: plan, duration: plan.duracion_recomendada });
-    setLoading(false);
+    try {
+      const userContext = await getGeminiContext();
+      const result = await analyzeLaunchWithGemini({
+        tarea: launch.task, resultado_deseado: launch.desiredResult, bloqueo: effectiveBlockage(launch), excusa: launch.excuse,
+        respuestas_cuestionario: launch.answers, preguntas: launch.questionnaire?.questions,
+        historial: { total: launchStats.total, completados: launchStats.completed, abandonados: launchStats.failed },
+        racha_abandonos: launchStats.failStreak, racha_completados: launchStats.completionStreak,
+        ultimos_5: launchHistory.slice(0, 5), userContext
+      });
+      const plan = normalizeLaunchPlan(result, local);
+      patchLaunch({ analysis: plan, duration: plan.duracion_recomendada });
+      if (plan === local) setAiFallbackMessage("La IA tardó demasiado. He preparado un protocolo local para que sigas ejecutando.");
+    } finally {
+      setLoading(false);
+    }
   }
 
   async function finishLaunch(completed) {
-    const finished = { ...launch, blockage: effectiveBlockage(launch), completed, saved: true, endedAt: new Date().toISOString() };
+    const finished = { ...launch, blockage: effectiveBlockage(launch), completed, abandoned: !completed, saved: true, endedAt: new Date().toISOString() };
     const saved = await persistLaunch(finished);
     setLaunch({ ...finished, remoteSessionId: saved.remoteSessionId });
     setLaunchStep("summary");
@@ -280,12 +314,12 @@ function App() {
   async function saveLaunchResult() {
     try {
       if (!launch.remoteSessionId) throw new Error("No remote session");
-      await updateLaunch10Session(launch.remoteSessionId, { actual_result: launch.actualResult });
+      await updateLaunch10Session(launch.remoteSessionId, { resultText: launch.actualResult });
       setLaunchHistory((history) => history.map((item, index) => index ? item : { ...item, actualResult: launch.actualResult }));
-    } catch {
+    } catch (error) {
       updateLatestLaunch({ actualResult: launch.actualResult });
       setLaunchHistory(readLaunchHistory());
-      setDataMessage("No se pudo actualizar Supabase. El resultado quedó respaldado localmente.");
+      setDataMessage(`No se pudo guardar en Supabase: ${error?.message || "Error desconocido"}. El resultado quedó respaldado localmente.`);
     }
     patchLaunch({ saved: true });
   }
@@ -305,11 +339,11 @@ function App() {
       {currentModule === "stats" && <StatsScreen combined={combinedStats} onMenu={goMenu} />}
       {currentModule === "antifall" && (
         <AntiFallModule step={antiStep} protocol={protocol} stats={antiStats} problemStats={problemStats} firmness={firmness}
-          config={config} loading={loading} onPatch={patchProtocol} onStart={startAntiFall} onAnalyze={prepareAntiAnalysis}
+          config={config} loading={loading} fallbackMessage={aiFallbackMessage} onPatch={patchProtocol} onStart={startAntiFall} onAnalyze={prepareAntiAnalysis}
           onGenerateAction={generateAntiAction} onStep={setAntiStep} onFinish={finishAntiFall} onMenu={goMenu} />
       )}
       {currentModule === "launch10" && (
-        <LaunchModule step={launchStep} launch={launch} loading={loading} onPatch={patchLaunch} onStart={startLaunch}
+        <LaunchModule step={launchStep} launch={launch} loading={loading} fallbackMessage={aiFallbackMessage} onPatch={patchLaunch} onStart={startLaunch}
           onQuestionnaire={generateLaunchQuestionnaire} onGenerate={generateLaunchAction} onStep={setLaunchStep}
           onFinish={finishLaunch} onSave={saveLaunchResult} onMenu={goMenu} />
       )}
@@ -324,7 +358,7 @@ function normalizeAntiSession(row) {
     details: row.details || "", reset: row.reset_action || "", emotion: row.emotion || "",
     avoidedTask: row.avoided_task || "", consequence: row.consequence || "",
     minimalAction: row.minimal_action || "", completed: Boolean(row.completed),
-    shield: row.shield || "", analysis: row.analysis || null
+    shield: row.shield || "", analysis: row.ai_result || null, abandoned: Boolean(row.abandoned)
   };
 }
 
@@ -332,9 +366,9 @@ function normalizeLaunchSession(row) {
   return {
     id: row.id, remoteSessionId: row.id, module: "launch10", date: row.started_at || row.created_at,
     endedAt: row.ended_at, task: row.task || "", desiredResult: row.desired_result || "",
-    blockage: row.blockage || "", excuse: row.excuse || "", questionnaire: row.questionnaire,
-    answers: row.answers || {}, analysis: row.plan, duration: row.duration || 10,
-    actualResult: row.actual_result || "", completed: Boolean(row.completed), saved: true
+    blockage: row.blockage || "", excuse: row.excuse || "", questionnaire: null,
+    answers: row.questionnaire_answers || {}, analysis: row.plan, duration: row.plan?.duracion_recomendada || 10,
+    actualResult: row.result_text || "", completed: Boolean(row.completed), abandoned: Boolean(row.abandoned), saved: true
   };
 }
 
@@ -549,12 +583,56 @@ function MainMenu({ onOpen, onProfile }) {
   </section>;
 }
 
-function AntiFallModule({ step, protocol, stats, problemStats, firmness, config, loading, onPatch, onStart, onAnalyze, onGenerateAction, onStep, onFinish, onMenu }) {
+const aiLoadingContent = {
+  questionnaire: {
+    title: "Preparando cuestionario",
+    subtitle: "La IA está cerrando el alcance de tu tarea para que no tengas que pensar de más.",
+    steps: ["Analizando la tarea", "Detectando el bloqueo", "Generando preguntas útiles"]
+  },
+  plan: {
+    title: "Generando plan de ejecución",
+    subtitle: "La IA está convirtiendo tu tarea en pasos pequeños con duración aproximada.",
+    steps: ["Leyendo tus respuestas", "Dividiendo la tarea", "Calculando duración aproximada", "Preparando acción mínima"]
+  },
+  antifall: {
+    title: "Activando protocolo",
+    subtitle: "La IA está usando tu historial y tu memoria para ajustar el tono.",
+    steps: ["Revisando patrón", "Analizando emoción", "Ajustando dureza", "Preparando acción mínima"]
+  }
+};
+
+function AiLoadingScreen({ variant }) {
+  const content = aiLoadingContent[variant];
+  const [activeStep, setActiveStep] = useState(0);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setActiveStep((current) => Math.min(current + 1, content.steps.length - 1));
+    }, 1800);
+    return () => window.clearInterval(timer);
+  }, [content.steps.length]);
+
+  return <section className="screen ai-loading-screen" aria-live="polite" aria-busy="true">
+    <div className="ai-loading-heading"><div className="ai-spinner" aria-hidden="true" /><div><p className="eyebrow">Procesando con IA</p><h1>{content.title}</h1><p className="subtitle">{content.subtitle}</p></div></div>
+    <div className="ai-progress" aria-hidden="true"><i style={{ width: `${((activeStep + 1) / content.steps.length) * 100}%` }} /></div>
+    <div className="ai-loading-steps">{content.steps.map((step, index) => {
+      const state = index < activeStep ? "done" : index === activeStep ? "active" : "pending";
+      return <div className={`ai-loading-step ${state}`} key={step}>
+        <span className="ai-step-status">{state === "done" ? <CheckCircle2 size={19} /> : <i />}</span>
+        <span>{step}</span>
+      </div>;
+    })}</div>
+    <p className="ai-loading-note">No cierres esta pantalla. Esto tarda unos segundos.</p>
+  </section>;
+}
+
+function AntiFallModule({ step, protocol, stats, problemStats, firmness, config, loading, fallbackMessage, onPatch, onStart, onAnalyze, onGenerateAction, onStep, onFinish, onMenu }) {
   if (step === "home") return <section className="screen home"><div className="stack center"><p className="eyebrow">Herramienta de disciplina personal</p><h1>Sistema Anticaída</h1><p className="subtitle">No eres una persona que abandona. Eres una persona que reajusta.</p><button className="primary-button large" onClick={onStart}><Play size={22} />Activar protocolo</button><button className="secondary-button" onClick={onMenu}>Menú</button></div><div className="metric-row"><Metric label="Iniciados" value={stats.total} /><Metric label="Completados" value={stats.completed} /><Metric label="Mejor racha" value={stats.bestCompletionStreak} /></div></section>;
   if (step === "problem") return <ProblemScreen protocol={protocol} firmness={firmness} onPatch={onPatch} onNext={onAnalyze} />;
-  if (step === "reset") return <ResetScreen protocol={protocol} firmness={firmness} config={config} loading={loading} onPatch={onPatch} onNext={() => onStep("emotion")} />;
+  if (loading) return <AiLoadingScreen variant="antifall" />;
+  if (step === "reset") return <ResetScreen protocol={protocol} firmness={firmness} config={config} fallbackMessage={fallbackMessage} onPatch={onPatch} onNext={() => onStep("emotion")} />;
   if (step === "emotion") return <EmotionScreen protocol={protocol} config={config} onPatch={onPatch} onNext={onGenerateAction} />;
-  if (step === "action") return <AntiActionScreen protocol={protocol} firmness={firmness} config={config} loading={loading} onPatch={onPatch} onNext={() => onStep("shield")} />;
+  if (step === "action") return <AntiActionScreen protocol={protocol} firmness={firmness} config={config} fallbackMessage={fallbackMessage} onPatch={onPatch} onNext={() => onStep("shield")} />;
   if (step === "shield") return <ShieldScreen protocol={protocol} config={config} onPatch={onPatch} onFinish={onFinish} />;
   return <AntiSummary protocol={protocol} stats={problemStats} onStart={onStart} onMenu={onMenu} />;
 }
@@ -569,10 +647,10 @@ function ProblemScreen({ protocol, firmness, onPatch, onNext }) {
   </section>;
 }
 
-function ResetScreen({ protocol, firmness, config, loading, onPatch, onNext }) {
+function ResetScreen({ protocol, firmness, config, fallbackMessage, onPatch, onNext }) {
   const options = [...new Set([protocol.analysis?.reset_fisico, ...config.resetOptions].filter(Boolean))];
   return <section className="screen"><StepHeader icon={<Dumbbell />} title="Haz un reset físico" text="Antes de pensar, cambia tu estado." /><FirmnessBanner firmness={firmness} message={protocol.analysis?.mensaje_duro} />
-    {loading && <p className="recommendation">Gemini está afinando el protocolo. El flujo local ya está disponible.</p>}
+    {fallbackMessage && <p className="recommendation">{fallbackMessage}</p>}
     <div className="option-grid">{options.map((item) => <button key={item} className={`option ${protocol.reset === item ? "selected" : ""}`} onClick={() => onPatch({ reset: item })}>{item}</button>)}</div>
     <button className="primary-button" disabled={!protocol.reset} onClick={onNext}>Ya hice el reset físico</button>
   </section>;
@@ -590,10 +668,11 @@ function EmotionScreen({ protocol, config, onPatch, onNext }) {
   </section>;
 }
 
-function AntiActionScreen({ protocol, firmness, config, loading, onPatch, onNext }) {
+function AntiActionScreen({ protocol, firmness, config, fallbackMessage, onPatch, onNext }) {
   const [running, setRunning] = useState(false);
   return <section className="screen"><StepHeader icon={<Clock />} title="Ejecuta la acción mínima" text="No resuelvas todo. Rompe la caída." /><FirmnessBanner firmness={firmness} message={protocol.analysis?.mensaje_duro} />
-    <div className="action-panel"><p className="eyebrow">{loading ? "Gemini está afinando la acción…" : "Acción mínima"}</p><h2>{protocol.action || config.minimalActions[0]}</h2><p>{protocol.analysis?.diagnostico}</p>
+    {fallbackMessage && <p className="recommendation">{fallbackMessage}</p>}
+    <div className="action-panel"><p className="eyebrow">Acción mínima</p><h2>{protocol.action || config.minimalActions[0]}</h2><p>{protocol.analysis?.diagnostico}</p>
       <Countdown minutes={10} running={running} />
       {!running ? <button className="primary-button large" onClick={() => { setRunning(true); onPatch({ actionStartedAt: new Date().toISOString() }); }}><Play size={20} />Empiezo ahora</button> : <button className="primary-button large success" onClick={onNext}><CheckCircle2 size={20} />He terminado</button>}
     </div>
@@ -617,12 +696,14 @@ function AntiSummary({ protocol, stats, onStart, onMenu }) {
   </section>;
 }
 
-function LaunchModule({ step, launch, loading, onPatch, onStart, onQuestionnaire, onGenerate, onStep, onFinish, onSave, onMenu }) {
+function LaunchModule({ step, launch, loading, fallbackMessage, onPatch, onStart, onQuestionnaire, onGenerate, onStep, onFinish, onSave, onMenu }) {
   if (step === "home") return <section className="screen home"><div className="stack center"><p className="eyebrow">Protocolo de inicio</p><h1>Arranque 10</h1><p className="subtitle">Convierte una tarea grande en una acción tan pequeña que no puedas rechazarla.</p><p className="launch-mantra">No tienes que tener ganas. Tienes que empezar pequeño.</p><div className="button-row center"><button className="primary-button large" onClick={onStart}><Rocket size={20} />Empezar arranque</button><button className="secondary-button" onClick={onMenu}>Menú</button></div></div></section>;
   if (step === "task") return <LaunchTask launch={launch} onPatch={onPatch} onNext={() => onStep("blockage")} />;
   if (step === "blockage") return <LaunchBlockage launch={launch} onPatch={onPatch} onNext={onQuestionnaire} />;
-  if (step === "questionnaire") return <LaunchQuestionnaire launch={launch} loading={loading} onPatch={onPatch} onGenerate={onGenerate} />;
-  if (step === "action") return <LaunchAction launch={launch} loading={loading} onPatch={onPatch} onStart={() => onStep("timer")} onRegenerate={onGenerate} onMenu={onMenu} />;
+  if (step === "questionnaire" && loading) return <AiLoadingScreen variant="questionnaire" />;
+  if (step === "action" && loading) return <AiLoadingScreen variant="plan" />;
+  if (step === "questionnaire") return <LaunchQuestionnaire launch={launch} fallbackMessage={fallbackMessage} onPatch={onPatch} onGenerate={onGenerate} />;
+  if (step === "action") return <LaunchAction launch={launch} fallbackMessage={fallbackMessage} onPatch={onPatch} onStart={() => onStep("timer")} onRegenerate={onGenerate} onMenu={onMenu} />;
   if (step === "timer") return <LaunchTimer launch={launch} onComplete={() => onFinish(true)} onAbandon={() => onFinish(false)} />;
   return <LaunchSummary launch={launch} onPatch={onPatch} onSave={onSave} onStart={onStart} onMenu={onMenu} />;
 }
@@ -645,7 +726,7 @@ function LaunchBlockage({ launch, onPatch, onNext }) {
   </section>;
 }
 
-function LaunchQuestionnaire({ launch, loading, onPatch, onGenerate }) {
+function LaunchQuestionnaire({ launch, fallbackMessage, onPatch, onGenerate }) {
   const questionnaire = launch.questionnaire;
   const questions = questionnaire?.questions || [];
   const valid = questions.length >= 3 && questions.every((item) => String(launch.answers?.[item.id] || "").trim());
@@ -653,20 +734,21 @@ function LaunchQuestionnaire({ launch, loading, onPatch, onGenerate }) {
     onPatch({ answers: { ...launch.answers, [id]: value } });
   }
   return <section className="screen"><StepHeader icon={<Target />} title="Cuestionario inteligente" text={questionnaire?.intro || "Cerrando el alcance de la tarea."} />
-    {loading && <p className="recommendation">Gemini está personalizando las preguntas. Puedes responder ya al cuestionario local.</p>}
+    {fallbackMessage && <p className="recommendation">{fallbackMessage}</p>}
     <div className="questionnaire">{questions.map((item, index) => <div className="question-card" key={item.id}>
       <p className="eyebrow">Pregunta {index + 1}</p><h2>{item.question}</h2>
       {item.type === "single_choice" ? <div className="choice-list">{item.options.map((option) => <button key={option} className={`option ${launch.answers?.[item.id] === option ? "selected" : ""}`} onClick={() => setAnswer(item.id, option)}>{option}</button>)}</div> : <input value={launch.answers?.[item.id] || ""} onChange={(e) => setAnswer(item.id, e.target.value)} placeholder="Respuesta concreta" />}
     </div>)}</div>
-    <button className="primary-button large" disabled={!valid || loading} onClick={onGenerate}>Generar plan de ejecución</button>
+    <button className="primary-button large" disabled={!valid} onClick={onGenerate}>Generar plan de ejecución</button>
   </section>;
 }
 
-function LaunchAction({ launch, loading, onPatch, onStart, onRegenerate, onMenu }) {
+function LaunchAction({ launch, fallbackMessage, onPatch, onStart, onRegenerate, onMenu }) {
   const analysis = launch.analysis;
   const total = analysis?.pasos?.reduce((sum, step) => sum + Number(step.duracion_minutos || 0), 0) || analysis?.duracion_recomendada || 10;
   return <section className="screen"><StepHeader icon={<Rocket />} title="Acción mínima generada" text="No termines la tarea. Rompe el inicio." />
-    <div className={`analysis-card tone-${analysis?.tono || "directo"}`}><p className="eyebrow">{loading ? "Gemini está afinando la respuesta…" : "Protocolo listo"}</p>
+    {fallbackMessage && <p className="recommendation">{fallbackMessage}</p>}
+    <div className={`analysis-card tone-${analysis?.tono || "directo"}`}><p className="eyebrow">Protocolo listo</p>
       <AnalysisItem label="Diagnóstico" value={analysis?.diagnostico} />
       <div className="minimal-action"><span>Acción mínima exacta</span><h2>{analysis?.accion_minima}</h2></div>
       <div className="execution-plan"><div className="plan-heading"><div><p className="eyebrow">Plan de ejecución</p><h2>{analysis?.pasos?.length || 0} pasos concretos</h2></div><strong>{total} min</strong></div>
@@ -676,7 +758,7 @@ function LaunchAction({ launch, loading, onPatch, onStart, onRegenerate, onMenu 
       <div className="dont-list"><p className="eyebrow">Qué no hacer ahora</p><ul>{analysis?.no_hacer?.map((item) => <li key={item}>{item}</li>)}</ul></div>
       <blockquote>{analysis?.mensaje_directo}</blockquote>
     </div>
-    <div className="button-row"><button className="primary-button large" disabled={loading} onClick={onStart}><Play size={20} />Empezar paso 1</button><button className="secondary-button" disabled={loading} onClick={onRegenerate}><RotateCcw size={17} />Regenerar</button><button className="ghost-button" onClick={onMenu}>Menú</button></div>
+    <div className="button-row"><button className="primary-button large" onClick={onStart}><Play size={20} />Empezar paso 1</button><button className="secondary-button" onClick={onRegenerate}><RotateCcw size={17} />Regenerar</button><button className="ghost-button" onClick={onMenu}>Menú</button></div>
   </section>;
 }
 
