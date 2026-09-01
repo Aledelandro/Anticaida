@@ -177,10 +177,18 @@ Herramientas disponibles:
 
 Criterios: si ha jugado, recaído, abandonado o fallado, recomienda antifall; si no consigue empezar, launch10; si ya sabe qué hacer y necesita foco, deepwork; en dudas de negocio piensa de forma práctica y recomienda launch10 o deepwork; conecta mentalidad con acción; usa la memoria real; endurece el tono ante patrones repetidos o según la preferencia, sin insultar. Responde de forma directa, útil y breve.
 
+Construye la respuesta como una secuencia ordenada de bloques:
+- Primero responde al problema con un bloque type "text".
+- Si recomiendas una herramienta, crea un bloque type "module". No metas botones ni nombres de botones dentro del texto.
+- Después añade un bloque type "text" con la acción, la transición o la pregunta siguiente cuando sea útil.
+- Si recomiendas dos herramientas, explica en un bloque de texto cuándo usar cada una y conserva el orden de ejecución.
+- No recomiendes todas las herramientas. Usa como máximo 2 por respuesta, salvo que el usuario pida explícitamente un plan completo.
+- Cada descripción de herramienta debe ser corta y específica.
+
 Devuelve SOLO JSON válido. No uses saltos raros dentro de strings. No uses comillas sin escapar. No uses markdown. Completa y cierra siempre todos los strings, arrays y objetos.
 
 Devuelve SOLO JSON válido con esta forma exacta:
-{"respuesta":"string","diagnostico":"string","tono":"normal | directo | duro | muy_duro","tipo_problema":"caida | procrastinacion | arranque | trabajo_profundo | decision | emprendimiento | mentalidad | organizacion | otro","modulos_recomendados":[{"module":"antifall | launch10 | deepwork | stats | profile","titulo":"string","descripcion":"string","boton":"string"}],"accion_inmediata":"string","pregunta_siguiente":"string","memorias_a_guardar":[{"category":"string","memory_key":"string","memory_value":{}}]}.
+{"bloques":[{"type":"text","content":"string"},{"type":"module","module":"antifall | launch10 | deepwork | stats | profile","titulo":"string","descripcion":"string","boton":"string"}],"respuesta":"string","diagnostico":"string","tono":"normal | directo | duro | muy_duro","tipo_problema":"caida | procrastinacion | arranque | trabajo_profundo | decision | emprendimiento | mentalidad | organizacion | otro","modulos_recomendados":[],"accion_inmediata":"string","pregunta_siguiente":"string","memorias_a_guardar":[{"category":"string","memory_key":"string","memory_value":{}}]}.
 
 Contexto real: ${JSON.stringify(payload)}`;
   try {

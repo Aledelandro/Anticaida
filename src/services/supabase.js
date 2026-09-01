@@ -421,11 +421,14 @@ export async function getCoachHistory(userId, limit = 30) {
   return (data || []).reverse();
 }
 
-export async function saveCoachExchange(userId, userMessage, assistantResponse) {
-  if (!supabase || !userId) throw new Error(supabaseConfigurationError || "Supabase no está configurado.");
+export async function saveCoachExchange(userMessage, assistantResponse) {
+  if (!supabase) throw new Error(supabaseConfigurationError || "Supabase no está configurado.");
+  const { data: { user }, error: userError } = await supabase.auth.getUser();
+  if (userError) throw userError;
+  if (!user) return null;
   const { data, error } = await supabase.from("coach_messages").insert([
-    { user_id: userId, role: "user", message: String(userMessage || "").trim(), ai_result: null },
-    { user_id: userId, role: "assistant", message: assistantResponse?.respuesta || "", ai_result: assistantResponse }
+    { user_id: user.id, role: "user", message: String(userMessage || "").trim(), ai_result: null },
+    { user_id: user.id, role: "assistant", message: assistantResponse?.respuesta || "", ai_result: assistantResponse }
   ]).select();
   if (error) throw error;
   return data;

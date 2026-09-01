@@ -70,6 +70,7 @@ function App() {
   const [coachLoading, setCoachLoading] = useState(false);
   const [coachHistoryLoaded, setCoachHistoryLoaded] = useState(false);
   const [coachDrawerOpen, setCoachDrawerOpen] = useState(false);
+  const [coachNotice, setCoachNotice] = useState("");
   const activeAiRequest = useRef(null);
 
   const antiStats = useMemo(() => getStats(antiHistory), [antiHistory]);
@@ -135,6 +136,7 @@ function App() {
   useEffect(() => {
     setCoachMessages([]);
     setCoachHistoryLoaded(false);
+    setCoachNotice("");
   }, [session?.user?.id]);
 
   useEffect(() => {
@@ -154,10 +156,10 @@ function App() {
       setCoachHistoryLoaded(true);
     }).catch((error) => {
       if (!active) return;
-      console.error("Coach history error:", error);
+      console.error("Coach history Supabase error:", error);
       setCoachMessages(readLocalCoachMessages(session.user.id));
       setCoachHistoryLoaded(true);
-      setDataMessage(`Historial del asistente: ${error?.message || "No se pudo consultar coach_messages"}. Se usará el historial local.`);
+      setCoachNotice("No se pudo sincronizar el historial. Guardado localmente.");
     });
     return () => { active = false; };
   }, [session?.user?.id, profile?.onboarding_completed, coachHistoryLoaded]);
@@ -246,16 +248,22 @@ function App() {
       };
       setCoachMessages((current) => [...current, assistantEntry]);
       try {
-        await saveCoachExchange(session.user.id, message, response);
+        const saved = await saveCoachExchange(message, response);
+        if (!saved) {
+          saveLocalCoachExchange(session.user.id, message, response);
+          setCoachNotice("No se pudo sincronizar el historial. Guardado localmente.");
+        } else {
+          setCoachNotice("");
+        }
       } catch (saveError) {
-        console.error("Coach persistence error:", saveError);
+        console.error("Coach persistence Supabase error:", saveError);
         saveLocalCoachExchange(session.user.id, message, response);
-        setDataMessage(`Historial del asistente: ${saveError?.message || "No se pudo guardar en coach_messages"}. La conversación se guardó localmente.`);
+        setCoachNotice("No se pudo sincronizar el historial. Guardado localmente.");
       }
       if (response.memorias_a_guardar.length) {
         saveCoachMemories(session.user.id, response.memorias_a_guardar).catch((memoryError) => {
           console.error("Coach memory error:", memoryError);
-          setDataMessage("La conversación se guardó, pero no se pudo actualizar la memoria del asistente.");
+          setCoachNotice("Conversación guardada. La memoria no pudo sincronizarse.");
         });
       }
     } catch (error) {
@@ -265,6 +273,7 @@ function App() {
         id: `local-assistant-${Date.now()}`, role: "assistant", response: fallback, localFallback: true, createdAt: new Date().toISOString()
       }]);
       saveLocalCoachExchange(session.user.id, message, fallback);
+      setCoachNotice("No se pudo sincronizar el historial. Guardado localmente.");
     } finally {
       setCoachLoading(false);
     }
@@ -650,13 +659,13 @@ function App() {
           </>}
         </div>
         <aside className="coach-sidebar" aria-label="Asistente de Ejecución">
-          <CoachChat messages={coachMessages} loading={coachLoading} historyLoaded={coachHistoryLoaded} onSend={sendCoachMessage} onOpen={navigateFromCoach} />
+          <CoachChat messages={coachMessages} loading={coachLoading} historyLoaded={coachHistoryLoaded} notice={coachNotice} onSend={sendCoachMessage} onOpen={navigateFromCoach} />
         </aside>
       </div>
       <button className="coach-floating-button" onClick={() => setCoachDrawerOpen(true)}><Bot size={19} />Asistente</button>
       {coachDrawerOpen && <div className="coach-drawer" role="dialog" aria-modal="true" aria-label="Asistente de Ejecución">
         <div className="coach-drawer-bar"><strong>Asistente de Ejecución</strong><button className="icon-button" onClick={() => setCoachDrawerOpen(false)} aria-label="Cerrar asistente"><X size={21} /></button></div>
-        <CoachChat messages={coachMessages} loading={coachLoading} historyLoaded={coachHistoryLoaded} onSend={sendCoachMessage} onOpen={async (module) => { await navigateFromCoach(module); setCoachDrawerOpen(false); }} />
+        <CoachChat messages={coachMessages} loading={coachLoading} historyLoaded={coachHistoryLoaded} notice={coachNotice} onSend={sendCoachMessage} onOpen={async (module) => { await navigateFromCoach(module); setCoachDrawerOpen(false); }} />
       </div>}
     </div></main>
   );
@@ -944,7 +953,7 @@ const coachSuggestions = [
   "Quiero organizar mi día"
 ];
 
-function CoachChat({ messages, loading, historyLoaded, onSend, onOpen }) {
+function CoachChat({ messages, loading, historyLoaded, notice, onSend, onOpen }) {
   const [input, setInput] = useState("");
   const endRef = useRef(null);
   const inputId = useId();
@@ -975,6 +984,8 @@ function CoachChat({ messages, loading, historyLoaded, onSend, onOpen }) {
     <div className="coach-suggestions" aria-label="Sugerencias rápidas">
       {coachSuggestions.map((suggestion) => <button key={suggestion} disabled={loading || !historyLoaded} onClick={() => useSuggestion(suggestion)}>{suggestion}</button>)}
     </div>
+
+    {notice && <div className="coach-sync-notice">{notice}</div>}
 
     <div className="chat-history" aria-live="polite">
       {!historyLoaded && <div className="chat-empty"><span className="ai-dot" />Cargando conversación…</div>}
@@ -1012,21 +1023,42 @@ function CoachThinking() {
 
 function CoachResponse({ response, localFallback, onOpen }) {
   if (!response) return null;
+  const blocks = Array.isArray(response.bloques) ? response.bloques : [];
+  const moduleBlockCount = blocks.filter((block) => block.type === "module").length;
+  const recommendations = Array.isArray(response.modulos_recomendados) ? response.modulos_recomendados : [];
   return <div className="chat-row assistant">
     <div className="chat-avatar"><Bot size={18} /></div>
     <div className={`chat-bubble assistant-bubble tone-border-${response.tono || "directo"}`}>
       {localFallback && <p className="coach-local-note">Respuesta local: Gemini no estaba disponible.</p>}
-      <p className="coach-answer">{response.respuesta}</p>
+      {blocks.length ? <div className={`coach-blocks module-count-${moduleBlockCount}`}>
+        {blocks.map((block, index) => block.type === "text"
+          ? <p className="coach-answer coach-text-block" key={`text-${index}`}>{block.content}</p>
+          : <CoachModuleCard item={block} onOpen={onOpen} key={`${block.module}-${index}`} />
+        )}
+      </div> : <p className="coach-answer">{response.respuesta}</p>}
       {response.accion_inmediata && <div className="coach-action"><span>Acción inmediata</span><strong>{response.accion_inmediata}</strong></div>}
-      {response.modulos_recomendados?.length > 0 && <div className="coach-recommendations">
-        {response.modulos_recomendados.map((item, index) => <article className="coach-module-card" key={`${item.module}-${index}`}>
-          <div><span>Herramienta recomendada</span><h3>{item.titulo}</h3><p>{item.descripcion}</p></div>
-          <button className="primary-button" onClick={() => onOpen(item.module)}>Ir<ArrowRight size={17} /></button>
-        </article>)}
+      {!blocks.length && recommendations.length > 0 && <div className={`coach-recommendations module-count-${recommendations.length}`}>
+        {recommendations.map((item, index) => <CoachModuleCard item={item} onOpen={onOpen} key={`${item.module}-${index}`} />)}
       </div>}
       {response.pregunta_siguiente && <p className="coach-question">{response.pregunta_siguiente}</p>}
     </div>
   </div>;
+}
+
+function CoachModuleCard({ item, onOpen }) {
+  return <article className="coach-module-card">
+    <div className="coach-module-heading"><span className="coach-module-icon"><CoachModuleIcon module={item.module} /></span><h3>{item.titulo}</h3></div>
+    <p>{item.descripcion}</p>
+    <button className="primary-button" onClick={() => onOpen(item.module)}>Ir<ArrowRight size={15} /></button>
+  </article>;
+}
+
+function CoachModuleIcon({ module }) {
+  if (module === "antifall") return <Shield size={15} />;
+  if (module === "launch10") return <Rocket size={15} />;
+  if (module === "deepwork") return <Clock size={15} />;
+  if (module === "stats") return <BarChart3 size={15} />;
+  return <User size={15} />;
 }
 
 function AntiFallModule({ step, protocol, stats, problemStats, firmness, config, fallbackMessage, onPatch, onStart, onAnalyze, onGenerateAction, onStep, onFinish, onMenu }) {
