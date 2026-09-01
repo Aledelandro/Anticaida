@@ -599,6 +599,13 @@ select:focus {
   font-variant-numeric: tabular-nums;
 }
 
+.ai-cancel-button {
+  width: fit-content;
+  margin: -12px auto 0;
+  color: #9ca2ad;
+  font-size: 0.86rem;
+}
+
 .fallback-notice {
   width: fit-content;
   margin: 0;

@@ -1,7 +1,8 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { Activity, AlertTriangle, BarChart3, CheckCircle2, ChevronLeft, Clock, Dumbbell, Flame, Lock, LogOut, Pause, Play, Rocket, RotateCcw, Shield, Target, User, XCircle } from "lucide-react";
 import "./styles.css";
+import AiLoadingScreen, { AI_LOADING_CONFIG } from "./AiLoadingScreen";
 import { getProblemConfig, problemOptions } from "./problemConfigs";
 import { analyzeAntiFallWithGemini, analyzeDeepWorkWithGemini, analyzeLaunchWithGemini, generateLaunchQuestionnaireWithGemini } from "./services/gemini";
 import {
@@ -36,6 +37,8 @@ const launchBlockages = [
   "Estoy cansado", "Quiero hacer otra cosa", "Estoy buscando hacerlo perfecto", "Otro"
 ];
 
+const AI_FALLBACK_MESSAGE = "La IA tardó demasiado. He preparado una versión local para que sigas ejecutando.";
+
 function toneFromFailures(failStreak, config) {
   const messages = config?.hardMessages || [];
   if (failStreak >= 4) return { level: 4, tone: "muy_duro", message: messages[3] || "No negocies. Ejecuta la acción mínima." };
@@ -59,8 +62,10 @@ function App() {
   const [antiHistory, setAntiHistory] = useState(() => readHistory());
   const [launchHistory, setLaunchHistory] = useState(() => readLaunchHistory());
   const [deepWorkHistory, setDeepWorkHistory] = useState(() => readDeepWorkHistory());
-  const [loading, setLoading] = useState(false);
+  const [isAiLoading, setIsAiLoading] = useState(false);
+  const [aiLoadingType, setAiLoadingType] = useState(null);
   const [aiFallbackMessage, setAiFallbackMessage] = useState("");
+  const activeAiRequest = useRef(null);
 
   const antiStats = useMemo(() => getStats(antiHistory), [antiHistory]);
   const launchStats = useMemo(() => getLaunchStats(launchHistory), [launchHistory]);
@@ -234,6 +239,34 @@ function App() {
     }
   }
 
+  async function beginAiRequest(type, useLocalFallback) {
+    const request = { id: Symbol(type), type, cancelled: false, useLocalFallback };
+    activeAiRequest.current = request;
+    setAiFallbackMessage("");
+    setAiLoadingType(type);
+    setIsAiLoading(true);
+
+    // Give React and the browser a paint opportunity before any fast failure can
+    // replace the loading screen with the local result.
+    await new Promise((resolve) => window.requestAnimationFrame(() => window.requestAnimationFrame(resolve)));
+    return request;
+  }
+
+  function finishAiRequest(request) {
+    if (activeAiRequest.current?.id !== request.id) return;
+    activeAiRequest.current = null;
+    setIsAiLoading(false);
+    setAiLoadingType(null);
+  }
+
+  function cancelAiRequest() {
+    const request = activeAiRequest.current;
+    if (!request) return;
+    request.cancelled = true;
+    request.useLocalFallback();
+    finishAiRequest(request);
+  }
+
   async function goMenu() {
     if (currentModule === "antifall" && !["home", "summary"].includes(antiStep) && protocol.startedAt) {
       await persistAnti({ ...protocol, completed: false, endedAt: new Date().toISOString() });
@@ -261,33 +294,55 @@ function App() {
 
   async function prepareAntiAnalysis() {
     const local = fallbackAnalysis({ protocol, stats: problemStats, firmness, config });
-    patchProtocol({ analysis: local, action: local.accion_minima });
-    setAntiStep("reset");
-    setAiFallbackMessage("");
-    setLoading(true);
+    const useLocalFallback = () => {
+      patchProtocol({ analysis: local, action: local.accion_minima });
+      setAiFallbackMessage(AI_FALLBACK_MESSAGE);
+      setAntiStep("reset");
+    };
+    const request = await beginAiRequest("anti_fall", useLocalFallback);
     try {
       const userContext = await getGeminiContext();
+      if (request.cancelled) return;
       const result = await analyzeAntiFallWithGemini({ ...buildGeminiPayload({ protocol, stats: problemStats, config }), userContext });
-      if (result?.accion_minima || result?.reset_fisico) patchProtocol({ analysis: { ...local, ...result }, action: result.accion_minima || local.accion_minima });
-      else setAiFallbackMessage("La IA tardó demasiado. He preparado un protocolo local para que sigas ejecutando.");
+      if (request.cancelled) return;
+      if (result?.accion_minima || result?.reset_fisico) {
+        patchProtocol({ analysis: { ...local, ...result }, action: result.accion_minima || local.accion_minima });
+        setAntiStep("reset");
+      } else {
+        useLocalFallback();
+      }
+    } catch (error) {
+      console.error("Anti-fall AI error:", error);
+      if (!request.cancelled) useLocalFallback();
     } finally {
-      setLoading(false);
+      finishAiRequest(request);
     }
   }
 
   async function generateAntiAction() {
     const local = fallbackAnalysis({ protocol, stats: problemStats, firmness, config });
-    patchProtocol({ analysis: local, action: local.accion_minima });
-    setAntiStep("action");
-    setAiFallbackMessage("");
-    setLoading(true);
+    const useLocalFallback = () => {
+      patchProtocol({ analysis: local, action: local.accion_minima });
+      setAiFallbackMessage(AI_FALLBACK_MESSAGE);
+      setAntiStep("action");
+    };
+    const request = await beginAiRequest("anti_fall", useLocalFallback);
     try {
       const userContext = await getGeminiContext();
+      if (request.cancelled) return;
       const result = await analyzeAntiFallWithGemini({ ...buildGeminiPayload({ protocol, stats: problemStats, config }), userContext });
-      if (result?.accion_minima) patchProtocol({ analysis: { ...local, ...result }, action: result.accion_minima });
-      else setAiFallbackMessage("La IA tardó demasiado. He preparado un protocolo local para que sigas ejecutando.");
+      if (request.cancelled) return;
+      if (result?.accion_minima) {
+        patchProtocol({ analysis: { ...local, ...result }, action: result.accion_minima });
+        setAntiStep("action");
+      } else {
+        useLocalFallback();
+      }
+    } catch (error) {
+      console.error("Anti-fall action AI error:", error);
+      if (!request.cancelled) useLocalFallback();
     } finally {
-      setLoading(false);
+      finishAiRequest(request);
     }
   }
 
@@ -307,32 +362,45 @@ function App() {
 
   async function generateLaunchQuestionnaire() {
     const local = getLocalLaunchQuestionnaire(launch.task, effectiveBlockage(launch));
-    patchLaunch({ questionnaire: local, answers: {} });
-    setLaunchStep("questionnaire");
-    setAiFallbackMessage("");
-    setLoading(true);
+    const useLocalFallback = () => {
+      patchLaunch({ questionnaire: local, answers: {} });
+      setAiFallbackMessage(AI_FALLBACK_MESSAGE);
+      setLaunchStep("questionnaire");
+    };
+    const request = await beginAiRequest("launch_questionnaire", useLocalFallback);
     try {
       const userContext = await getGeminiContext();
+      if (request.cancelled) return;
       const result = await generateLaunchQuestionnaireWithGemini({
         task: launch.task, desiredResult: launch.desiredResult, blockage: effectiveBlockage(launch), excuse: launch.excuse,
         userContext
       });
+      if (request.cancelled) return;
       const questionnaire = normalizeQuestionnaire(result, local);
-      patchLaunch({ questionnaire });
-      if (questionnaire === local) setAiFallbackMessage("La IA tardó demasiado. He preparado un protocolo local para que sigas ejecutando.");
+      if (questionnaire === local) useLocalFallback();
+      else {
+        patchLaunch({ questionnaire, answers: {} });
+        setLaunchStep("questionnaire");
+      }
+    } catch (error) {
+      console.error("Launch questionnaire AI error:", error);
+      if (!request.cancelled) useLocalFallback();
     } finally {
-      setLoading(false);
+      finishAiRequest(request);
     }
   }
 
   async function generateLaunchAction() {
     const local = getLocalLaunchPlan(launch.task, effectiveBlockage(launch), launch.answers, launchStats);
-    patchLaunch({ analysis: local, duration: local.duracion_recomendada });
-    setLaunchStep("action");
-    setAiFallbackMessage("");
-    setLoading(true);
+    const useLocalFallback = () => {
+      patchLaunch({ analysis: local, duration: local.duracion_recomendada });
+      setAiFallbackMessage(AI_FALLBACK_MESSAGE);
+      setLaunchStep("action");
+    };
+    const request = await beginAiRequest("launch_plan", useLocalFallback);
     try {
       const userContext = await getGeminiContext();
+      if (request.cancelled) return;
       const result = await analyzeLaunchWithGemini({
         tarea: launch.task, resultado_deseado: launch.desiredResult, bloqueo: effectiveBlockage(launch), excusa: launch.excuse,
         respuestas_cuestionario: launch.answers, preguntas: launch.questionnaire?.questions,
@@ -340,11 +408,18 @@ function App() {
         racha_abandonos: launchStats.failStreak, racha_completados: launchStats.completionStreak,
         ultimos_5: launchHistory.slice(0, 5), userContext
       });
+      if (request.cancelled) return;
       const plan = normalizeLaunchPlan(result, local);
-      patchLaunch({ analysis: plan, duration: plan.duracion_recomendada });
-      if (plan === local) setAiFallbackMessage("La IA tardó demasiado. He preparado un protocolo local para que sigas ejecutando.");
+      if (plan === local) useLocalFallback();
+      else {
+        patchLaunch({ analysis: plan, duration: plan.duracion_recomendada });
+        setLaunchStep("action");
+      }
+    } catch (error) {
+      console.error("Launch plan AI error:", error);
+      if (!request.cancelled) useLocalFallback();
     } finally {
-      setLoading(false);
+      finishAiRequest(request);
     }
   }
 
@@ -378,11 +453,15 @@ function App() {
   async function prepareDeepWorkPlan() {
     const memory = { deepWorkStats, history: deepWorkHistory.slice(0, 5) };
     const local = getLocalDeepWorkPlan(deepWork, memory);
-    setDeepWorkStep("plan");
-    setAiFallbackMessage("");
-    setLoading(true);
+    const useLocalFallback = () => {
+      patchDeepWork({ analysis: local });
+      setAiFallbackMessage(AI_FALLBACK_MESSAGE);
+      setDeepWorkStep("plan");
+    };
+    const request = await beginAiRequest("deep_work", useLocalFallback);
     try {
       const userContext = await getGeminiContext();
+      if (request.cancelled) return;
       const result = await analyzeDeepWorkWithGemini({
         tarea: deepWork.task, resultado_deseado: deepWork.desiredResult, duracion: deepWork.durationMinutes,
         distracciones: deepWork.distractions, otra_distraccion: deepWork.otherDistraction,
@@ -392,11 +471,18 @@ function App() {
         historial_arranque10: userContext.launch10Sessions?.slice(0, 3),
         historial_trabajo_profundo: userContext.deepWorkSessions?.slice(0, 3)
       });
+      if (request.cancelled) return;
       const plan = normalizeDeepWorkPlan(result, local, deepWork.durationMinutes);
-      patchDeepWork({ analysis: plan });
-      if (plan === local) setAiFallbackMessage("La IA tardó demasiado. He preparado una versión local para que sigas ejecutando.");
+      if (plan === local) useLocalFallback();
+      else {
+        patchDeepWork({ analysis: plan });
+        setDeepWorkStep("plan");
+      }
+    } catch (error) {
+      console.error("Deep work AI error:", error);
+      if (!request.cancelled) useLocalFallback();
     } finally {
-      setLoading(false);
+      finishAiRequest(request);
     }
   }
 
@@ -419,6 +505,11 @@ function App() {
   if (!session) return <AuthScreen />;
   if (!profile) return <AppLoading text="Cargando tu perfil…" />;
   if (!profile.onboarding_completed) return <OnboardingScreen profile={profile} onComplete={setProfile} />;
+  if (isAiLoading && aiLoadingType) {
+    return <main className="app"><div className="shell ai-loading-shell">
+      <AiLoadingScreen type={aiLoadingType} {...AI_LOADING_CONFIG[aiLoadingType]} onCancel={cancelAiRequest} />
+    </div></main>;
+  }
 
   return (
     <main className="app"><div className="shell">
@@ -429,16 +520,16 @@ function App() {
       {currentModule === "stats" && <StatsScreen combined={combinedStats} onMenu={goMenu} />}
       {currentModule === "antifall" && (
         <AntiFallModule step={antiStep} protocol={protocol} stats={antiStats} problemStats={problemStats} firmness={firmness}
-          config={config} loading={loading} fallbackMessage={aiFallbackMessage} onPatch={patchProtocol} onStart={startAntiFall} onAnalyze={prepareAntiAnalysis}
+          config={config} fallbackMessage={aiFallbackMessage} onPatch={patchProtocol} onStart={startAntiFall} onAnalyze={prepareAntiAnalysis}
           onGenerateAction={generateAntiAction} onStep={setAntiStep} onFinish={finishAntiFall} onMenu={goMenu} />
       )}
       {currentModule === "launch10" && (
-        <LaunchModule step={launchStep} launch={launch} loading={loading} fallbackMessage={aiFallbackMessage} onPatch={patchLaunch} onStart={startLaunch}
+        <LaunchModule step={launchStep} launch={launch} fallbackMessage={aiFallbackMessage} onPatch={patchLaunch} onStart={startLaunch}
           onQuestionnaire={generateLaunchQuestionnaire} onGenerate={generateLaunchAction} onStep={setLaunchStep}
           onFinish={finishLaunch} onSave={saveLaunchResult} onMenu={goMenu} />
       )}
       {currentModule === "deepwork" && (
-        <DeepWorkModule step={deepWorkStep} session={deepWork} loading={loading} fallbackMessage={aiFallbackMessage}
+        <DeepWorkModule step={deepWorkStep} session={deepWork} fallbackMessage={aiFallbackMessage}
           onPatch={patchDeepWork} onStart={startDeepWork} onPrepare={prepareDeepWorkPlan} onStep={setDeepWorkStep}
           onAbandon={abandonDeepWork} onSave={saveDeepWorkReview} onMenu={goMenu}
           onStats={() => { setCurrentModule("stats"); }} />
@@ -720,69 +811,9 @@ function MainMenu({ onOpen, onProfile }) {
   </section>;
 }
 
-const aiLoadingContent = {
-  questionnaire: {
-    title: "Preparando cuestionario",
-    subtitle: "La IA está cerrando el alcance de tu tarea para que no tengas que pensar de más.",
-    steps: ["Analizando la tarea", "Detectando el bloqueo", "Generando preguntas útiles"],
-    timeoutSeconds: 20
-  },
-  plan: {
-    title: "Generando plan de ejecución",
-    subtitle: "La IA está convirtiendo tu tarea en pasos pequeños con duración aproximada.",
-    steps: ["Leyendo tus respuestas", "Dividiendo la tarea", "Calculando duración aproximada", "Preparando acción mínima"],
-    timeoutSeconds: 30
-  },
-  antifall: {
-    title: "Activando protocolo",
-    subtitle: "La IA está usando tu historial y tu memoria para ajustar el tono.",
-    steps: ["Revisando patrón", "Analizando emoción", "Ajustando dureza", "Preparando acción mínima"],
-    timeoutSeconds: 20
-  },
-  deepwork: {
-    title: "Preparando bloque",
-    subtitle: "La IA está convirtiendo tu objetivo en un plan de ejecución.",
-    steps: ["Leyendo tu objetivo", "Revisando tu memoria", "Detectando distracciones", "Dividiendo el bloque", "Preparando plan final"],
-    timeoutSeconds: 35
-  }
-};
-
-function AiLoadingScreen({ variant }) {
-  const content = aiLoadingContent[variant];
-  const [activeStep, setActiveStep] = useState(0);
-  const [elapsedSeconds, setElapsedSeconds] = useState(0);
-
-  useEffect(() => {
-    const stepTimer = window.setInterval(() => {
-      setActiveStep((current) => Math.min(current + 1, content.steps.length - 1));
-    }, Math.floor((content.timeoutSeconds * 1000) / content.steps.length));
-    const counterTimer = window.setInterval(() => {
-      setElapsedSeconds((current) => Math.min(current + 1, content.timeoutSeconds));
-    }, 1000);
-    return () => {
-      window.clearInterval(stepTimer);
-      window.clearInterval(counterTimer);
-    };
-  }, [content.steps.length, content.timeoutSeconds]);
-
-  return <section className="screen ai-loading-screen" aria-live="polite" aria-busy="true">
-    <div className="ai-loading-heading"><div className="ai-spinner" aria-hidden="true" /><div><p className="eyebrow">Procesando con IA</p><h1>{content.title}</h1><p className="subtitle">{content.subtitle}</p></div></div>
-    <div className="ai-progress" aria-hidden="true"><i style={{ width: `${((activeStep + 1) / content.steps.length) * 100}%` }} /></div>
-    <div className="ai-loading-steps">{content.steps.map((step, index) => {
-      const state = index < activeStep ? "done" : index === activeStep ? "active" : "pending";
-      return <div className={`ai-loading-step ${state}`} key={step}>
-        <span className="ai-step-status">{state === "done" ? <CheckCircle2 size={19} /> : <i />}</span>
-        <span>{step}</span>
-      </div>;
-    })}</div>
-    <div className="ai-loading-counter"><span>Esto puede tardar hasta 30 segundos.</span><strong>{elapsedSeconds}s</strong></div>
-  </section>;
-}
-
-function AntiFallModule({ step, protocol, stats, problemStats, firmness, config, loading, fallbackMessage, onPatch, onStart, onAnalyze, onGenerateAction, onStep, onFinish, onMenu }) {
+function AntiFallModule({ step, protocol, stats, problemStats, firmness, config, fallbackMessage, onPatch, onStart, onAnalyze, onGenerateAction, onStep, onFinish, onMenu }) {
   if (step === "home") return <section className="screen home"><div className="stack center"><p className="eyebrow">Herramienta de disciplina personal</p><h1>Sistema Anticaída</h1><p className="subtitle">No eres una persona que abandona. Eres una persona que reajusta.</p><button className="primary-button large" onClick={onStart}><Play size={22} />Activar protocolo</button><button className="secondary-button" onClick={onMenu}>Menú</button></div><div className="metric-row"><Metric label="Iniciados" value={stats.total} /><Metric label="Completados" value={stats.completed} /><Metric label="Mejor racha" value={stats.bestCompletionStreak} /></div></section>;
   if (step === "problem") return <ProblemScreen protocol={protocol} firmness={firmness} onPatch={onPatch} onNext={onAnalyze} />;
-  if (loading) return <AiLoadingScreen variant="antifall" />;
   if (step === "reset") return <ResetScreen protocol={protocol} firmness={firmness} config={config} fallbackMessage={fallbackMessage} onPatch={onPatch} onNext={() => onStep("emotion")} />;
   if (step === "emotion") return <EmotionScreen protocol={protocol} config={config} onPatch={onPatch} onNext={onGenerateAction} />;
   if (step === "action") return <AntiActionScreen protocol={protocol} firmness={firmness} config={config} fallbackMessage={fallbackMessage} onPatch={onPatch} onNext={() => onStep("shield")} />;
@@ -849,12 +880,10 @@ function AntiSummary({ protocol, stats, onStart, onMenu }) {
   </section>;
 }
 
-function LaunchModule({ step, launch, loading, fallbackMessage, onPatch, onStart, onQuestionnaire, onGenerate, onStep, onFinish, onSave, onMenu }) {
+function LaunchModule({ step, launch, fallbackMessage, onPatch, onStart, onQuestionnaire, onGenerate, onStep, onFinish, onSave, onMenu }) {
   if (step === "home") return <section className="screen home"><div className="stack center"><p className="eyebrow">Protocolo de inicio</p><h1>Arranque 10</h1><p className="subtitle">Convierte una tarea grande en una acción tan pequeña que no puedas rechazarla.</p><p className="launch-mantra">No tienes que tener ganas. Tienes que empezar pequeño.</p><div className="button-row center"><button className="primary-button large" onClick={onStart}><Rocket size={20} />Empezar arranque</button><button className="secondary-button" onClick={onMenu}>Menú</button></div></div></section>;
   if (step === "task") return <LaunchTask launch={launch} onPatch={onPatch} onNext={() => onStep("blockage")} />;
   if (step === "blockage") return <LaunchBlockage launch={launch} onPatch={onPatch} onNext={onQuestionnaire} />;
-  if (step === "questionnaire" && loading) return <AiLoadingScreen variant="questionnaire" />;
-  if (step === "action" && loading) return <AiLoadingScreen variant="plan" />;
   if (step === "questionnaire") return <LaunchQuestionnaire launch={launch} fallbackMessage={fallbackMessage} onPatch={onPatch} onGenerate={onGenerate} />;
   if (step === "action") return <LaunchAction launch={launch} fallbackMessage={fallbackMessage} onPatch={onPatch} onStart={() => onStep("timer")} onRegenerate={onGenerate} onMenu={onMenu} />;
   if (step === "timer") return <LaunchTimer launch={launch} onComplete={() => onFinish(true)} onAbandon={() => onFinish(false)} />;
@@ -945,10 +974,9 @@ function LaunchSummary({ launch, onPatch, onSave, onStart, onMenu }) {
 
 const deepWorkDistractions = ["Juegos", "Móvil", "YouTube", "Redes sociales", "Dudas", "Perfeccionismo", "Cansancio", "Otra"];
 
-function DeepWorkModule({ step, session, loading, fallbackMessage, onPatch, onStart, onPrepare, onStep, onAbandon, onSave, onMenu, onStats }) {
+function DeepWorkModule({ step, session, fallbackMessage, onPatch, onStart, onPrepare, onStep, onAbandon, onSave, onMenu, onStats }) {
   if (step === "home") return <section className="screen home"><div className="stack center"><p className="eyebrow">Modo de concentración</p><h1>Trabajo Profundo</h1><p className="subtitle">Bloques serios de ejecución con objetivo claro.</p><p className="launch-mantra">Durante este bloque no buscas motivación. Buscas foco.</p><div className="button-row center"><button className="primary-button large" onClick={onStart}><Play size={20} />Empezar bloque</button><button className="secondary-button" onClick={onMenu}>Menú</button></div></div></section>;
   if (step === "setup") return <DeepWorkSetup session={session} onPatch={onPatch} onPrepare={onPrepare} onMenu={onMenu} />;
-  if (step === "plan" && loading) return <AiLoadingScreen variant="deepwork" />;
   if (step === "plan") return <DeepWorkPlan session={session} fallbackMessage={fallbackMessage} onStart={() => onStep("timer")} onRegenerate={onPrepare} onMenu={onMenu} />;
   if (step === "timer") return <DeepWorkTimer session={session} onPatch={onPatch} onComplete={(stepsCompleted) => { onPatch({ stepsCompleted }); onStep("review"); }} onAbandon={onAbandon} onMenu={onMenu} />;
   if (step === "review") return <DeepWorkReview session={session} onPatch={onPatch} onSave={onSave} onMenu={onMenu} />;
