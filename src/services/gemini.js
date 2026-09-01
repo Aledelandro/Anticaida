@@ -1,4 +1,4 @@
-const GEMINI_MODEL = "gemini-2.0-flash";
+const GEMINI_MODEL = "gemini-3.6-flash";
 
 async function callGemini(prompt) {
   const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
@@ -35,11 +35,21 @@ async function callGemini(prompt) {
     const rawText = await response.text();
 
     if (!response.ok) {
+      if (response.status === 404) {
+        console.error("Gemini 404. Modelo usado:", GEMINI_MODEL);
+      }
       console.error("Gemini HTTP error:", response.status, rawText);
       return null;
     }
 
-    const data = JSON.parse(rawText);
+    let data;
+    try {
+      data = JSON.parse(rawText);
+    } catch (parseError) {
+      console.error("Gemini response JSON parse error:", parseError, rawText);
+      return null;
+    }
+
     const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
 
     if (!text) {
@@ -50,7 +60,7 @@ async function callGemini(prompt) {
     try {
       return JSON.parse(
         text
-          .replace(/```json/g, "")
+          .replace(/```json/gi, "")
           .replace(/```/g, "")
           .trim()
       );
