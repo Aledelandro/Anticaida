@@ -1,18 +1,19 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { Activity, AlertTriangle, BarChart3, CheckCircle2, ChevronLeft, Clock, Dumbbell, Flame, Lock, LogOut, Pause, Play, Rocket, RotateCcw, Shield, Target, User, XCircle } from "lucide-react";
+import { Activity, AlertTriangle, ArrowRight, BarChart3, Bot, CheckCircle2, ChevronLeft, Clock, Dumbbell, Flame, Lock, LogOut, Pause, Play, Rocket, RotateCcw, Send, Shield, Target, User, XCircle } from "lucide-react";
 import "./styles.css";
 import AiLoadingScreen, { AI_LOADING_CONFIG } from "./AiLoadingScreen";
 import { getProblemConfig, problemOptions } from "./problemConfigs";
-import { analyzeAntiFallWithGemini, analyzeDeepWorkWithGemini, analyzeLaunchWithGemini, generateLaunchQuestionnaireWithGemini } from "./services/gemini";
+import { analyzeAntiFallWithGemini, analyzeCoachMessageWithGemini, analyzeDeepWorkWithGemini, analyzeLaunchWithGemini, generateLaunchQuestionnaireWithGemini } from "./services/gemini";
+import { getLocalCoachResponse, normalizeCoachResult } from "./services/coach";
 import {
   buildGeminiPayload, createDeepWorkRecord, createLaunchRecord, createProtocolRecord, fallbackAnalysis, getCombinedStats, getDeepWorkStats, getLaunchStats, getLocalDeepWorkPlan, getLocalLaunchPlan, getLocalLaunchQuestionnaire, getStats,
   markActiveFailureIfNeeded, readDeepWorkHistory, readHistory, readLaunchHistory, recordProtocolStarted, saveActiveProtocol,
   saveDeepWork, saveLaunch, saveProtocol, updateActiveProtocol, updateLatestLaunch
 } from "./services/storage";
 import {
-  debugSupabaseConnection, ensureUserProfile, isSupabaseConfigured, loadUserContext, saveAntiFallSession,
-  saveDeepWorkSession, saveLaunch10Session, saveOnboarding, supabase, supabaseConfigurationError, updateDeepWorkMemory, updateLaunch10Session, updateProfile
+  debugSupabaseConnection, ensureUserProfile, getCoachHistory, isSupabaseConfigured, loadUserContext, saveAntiFallSession,
+  saveCoachExchange, saveCoachMemories, saveDeepWorkSession, saveLaunch10Session, saveOnboarding, supabase, supabaseConfigurationError, updateDeepWorkMemory, updateLaunch10Session, updateProfile
 } from "./services/supabase";
 
 const initialProtocol = {
@@ -65,6 +66,9 @@ function App() {
   const [isAiLoading, setIsAiLoading] = useState(false);
   const [aiLoadingType, setAiLoadingType] = useState(null);
   const [aiFallbackMessage, setAiFallbackMessage] = useState("");
+  const [coachMessages, setCoachMessages] = useState([]);
+  const [coachLoading, setCoachLoading] = useState(false);
+  const [coachHistoryLoaded, setCoachHistoryLoaded] = useState(false);
   const activeAiRequest = useRef(null);
 
   const antiStats = useMemo(() => getStats(antiHistory), [antiHistory]);
@@ -128,6 +132,30 @@ function App() {
   }, [session?.user?.id]);
 
   useEffect(() => {
+    setCoachMessages([]);
+    setCoachHistoryLoaded(false);
+  }, [session?.user?.id]);
+
+  useEffect(() => {
+    if (currentModule !== "coach" || !session?.user?.id || coachHistoryLoaded) return;
+    let active = true;
+    getCoachHistory(session.user.id).then((rows) => {
+      if (!active) return;
+      setCoachMessages(rows.flatMap((row) => [
+        { id: `coach-${row.id}-user`, role: "user", text: row.user_message, createdAt: row.created_at },
+        { id: `coach-${row.id}-assistant`, role: "assistant", response: row.assistant_response, createdAt: row.created_at }
+      ]));
+      setCoachHistoryLoaded(true);
+    }).catch((error) => {
+      if (!active) return;
+      console.error("Coach history error:", error);
+      setCoachHistoryLoaded(true);
+      setDataMessage("No se pudo cargar el historial del asistente. Aplica la migración de conversaciones si aún no está creada.");
+    });
+    return () => { active = false; };
+  }, [currentModule, session?.user?.id, coachHistoryLoaded]);
+
+  useEffect(() => {
     const beforeUnload = (event) => {
       if (currentModule === "antifall" && !["home", "summary"].includes(antiStep) && protocol.problemId) {
         updateActiveProtocol({ abandonedByClose: true });
@@ -161,6 +189,64 @@ function App() {
     if (module === "antifall") setAntiStep("home");
     if (module === "launch10") setLaunchStep("home");
     if (module === "deepwork") setDeepWorkStep("home");
+  }
+
+  async function sendCoachMessage(rawMessage) {
+    const message = String(rawMessage || "").trim();
+    if (!message || coachLoading) return;
+    const userEntry = { id: `local-user-${Date.now()}`, role: "user", text: message, createdAt: new Date().toISOString() };
+    setCoachMessages((current) => [...current, userEntry]);
+    setCoachLoading(true);
+    setDataMessage("");
+    try {
+      const userContext = await getGeminiContext();
+      const fallback = getLocalCoachResponse(message, userContext);
+      const shortHistory = coachMessages.slice(-8).map((item) => item.role === "user"
+        ? { role: "user", content: item.text }
+        : { role: "assistant", content: item.response?.respuesta || "" }
+      );
+      const result = await analyzeCoachMessageWithGemini({
+        mensaje_usuario: message,
+        perfil: summarizeProfile(userContext.profile || profile),
+        memoria: summarizeUserMemory(userContext.userMemory),
+        ultimas_sesiones: {
+          anti_fall: userContext.antiFallSessions?.slice(0, 5),
+          launch10: userContext.launch10Sessions?.slice(0, 5),
+          deep_work: userContext.deepWorkSessions?.slice(0, 5)
+        },
+        historial_chat: shortHistory,
+        modulos_disponibles: ["antifall", "launch10", "deepwork", "stats", "profile"]
+      });
+      const response = normalizeCoachResult(result, fallback);
+      const assistantEntry = {
+        id: `local-assistant-${Date.now()}`,
+        role: "assistant",
+        response,
+        localFallback: !result || response === fallback,
+        createdAt: new Date().toISOString()
+      };
+      setCoachMessages((current) => [...current, assistantEntry]);
+      try {
+        await saveCoachExchange(session.user.id, message, response);
+      } catch (saveError) {
+        console.error("Coach persistence error:", saveError);
+        setDataMessage("La respuesta está disponible, pero no se pudo guardar en Supabase. Comprueba que la migración del asistente está aplicada.");
+      }
+      if (response.memorias_a_guardar.length) {
+        saveCoachMemories(session.user.id, response.memorias_a_guardar).catch((memoryError) => {
+          console.error("Coach memory error:", memoryError);
+          setDataMessage("La conversación se guardó, pero no se pudo actualizar la memoria del asistente.");
+        });
+      }
+    } catch (error) {
+      console.error("Coach error:", error);
+      const fallback = getLocalCoachResponse(message, { profile, antiFallSessions: antiHistory });
+      setCoachMessages((current) => [...current, {
+        id: `local-assistant-${Date.now()}`, role: "assistant", response: fallback, localFallback: true, createdAt: new Date().toISOString()
+      }]);
+    } finally {
+      setCoachLoading(false);
+    }
   }
 
   async function persistAnti(finished) {
@@ -518,6 +604,7 @@ function App() {
       {currentModule === "menu" && <MainMenu onOpen={openModule} onProfile={() => setCurrentModule("profile")} />}
       {currentModule === "profile" && <ProfileScreen user={session.user} profile={profile} onProfile={setProfile} onMenu={goMenu} />}
       {currentModule === "stats" && <StatsScreen combined={combinedStats} onMenu={goMenu} />}
+      {currentModule === "coach" && <CoachChatModule messages={coachMessages} loading={coachLoading} historyLoaded={coachHistoryLoaded} onSend={sendCoachMessage} onOpen={openModule} onMenu={goMenu} />}
       {currentModule === "antifall" && (
         <AntiFallModule step={antiStep} protocol={protocol} stats={antiStats} problemStats={problemStats} firmness={firmness}
           config={config} fallbackMessage={aiFallbackMessage} onPatch={patchProtocol} onStart={startAntiFall} onAnalyze={prepareAntiAnalysis}
@@ -795,6 +882,7 @@ function TopBar({ currentModule, antiStats, onMenu, onStats }) {
 
 function MainMenu({ onOpen, onProfile }) {
   const cards = [
+    ["Asistente de Ejecución", "Habla con la IA cuando no sepas qué hacer, estés bloqueado o necesites decidir.", <Bot />, "coach", "Entrar"],
     ["Sistema Anticaída", "Cuando estás a punto de caer, jugar, procrastinar o abandonar.", <Shield />, "antifall", "Entrar"],
     ["Arranque 10", "Cuando sabes lo que tienes que hacer, pero no consigues empezar.", <Rocket />, "launch10", "Entrar"],
     ["Trabajo Profundo", "Bloques serios de ejecución con objetivo claro.", <Clock />, "deepwork", "Entrar"],
@@ -809,6 +897,86 @@ function MainMenu({ onOpen, onProfile }) {
       {module ? <button className="primary-button" onClick={() => onOpen(module)}>{label}</button> : <span className="soon"><Lock size={14} />Próximamente</span>}
     </article>)}</div>
   </section>;
+}
+
+const coachSuggestions = [
+  "He vuelto a jugar",
+  "Estoy procrastinando",
+  "No sé por dónde empezar",
+  "Tengo dudas con mi negocio",
+  "Estoy cansado",
+  "Quiero organizar mi día"
+];
+
+function CoachChatModule({ messages, loading, historyLoaded, onSend, onOpen, onMenu }) {
+  const [input, setInput] = useState("");
+  const endRef = useRef(null);
+
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }, [messages.length, loading]);
+
+  function submit(event) {
+    event.preventDefault();
+    const value = input.trim();
+    if (!value || loading || !historyLoaded) return;
+    setInput("");
+    onSend(value);
+  }
+
+  function useSuggestion(value) {
+    if (loading || !historyLoaded) return;
+    onSend(value);
+  }
+
+  return <section className="screen coach-screen">
+    <div className="coach-heading">
+      <div className="step-icon"><Bot /></div>
+      <div><p className="eyebrow">Coach de ejecución, negocio y mentalidad</p><h1>Asistente de Ejecución</h1><p className="subtitle">Cuéntame qué pasa. Te diré qué hacer y qué herramienta usar.</p></div>
+    </div>
+
+    <div className="coach-suggestions" aria-label="Sugerencias rápidas">
+      {coachSuggestions.map((suggestion) => <button key={suggestion} disabled={loading || !historyLoaded} onClick={() => useSuggestion(suggestion)}>{suggestion}</button>)}
+    </div>
+
+    <div className="chat-history" aria-live="polite">
+      {!historyLoaded && <div className="chat-empty"><span className="ai-dot" />Cargando conversación…</div>}
+      {historyLoaded && !messages.length && <div className="chat-empty"><Bot size={22} /><div><strong>Describe la situación sin maquillarla.</strong><p>Te devolveré una acción y, si encaja, el módulo que debes abrir.</p></div></div>}
+      {messages.map((message) => message.role === "user"
+        ? <div className="chat-row user" key={message.id}><div className="chat-bubble user-bubble">{message.text}</div></div>
+        : <CoachResponse key={message.id} response={message.response} localFallback={message.localFallback} onOpen={onOpen} />
+      )}
+      {loading && <div className="chat-row assistant"><div className="chat-avatar"><Bot size={18} /></div><div className="chat-bubble assistant-bubble coach-thinking"><span className="ai-dot" />La IA está analizando tu situación…</div></div>}
+      <div ref={endRef} />
+    </div>
+
+    <form className="coach-composer" onSubmit={submit}>
+      <label htmlFor="coach-message">¿Qué está pasando?</label>
+      <textarea id="coach-message" value={input} onChange={(event) => setInput(event.target.value)} onKeyDown={(event) => {
+        if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); submit(event); }
+      }} placeholder="Escribe el problema, la duda o la situación concreta…" disabled={loading || !historyLoaded} />
+      <div className="coach-composer-actions"><span>Enter para enviar · Shift + Enter para nueva línea</span><div className="button-row"><button className="secondary-button" type="button" onClick={onMenu}>Menú</button><button className="primary-button" disabled={loading || !historyLoaded || !input.trim()}><Send size={18} />Enviar</button></div></div>
+    </form>
+  </section>;
+}
+
+function CoachResponse({ response, localFallback, onOpen }) {
+  if (!response) return null;
+  return <div className="chat-row assistant">
+    <div className="chat-avatar"><Bot size={18} /></div>
+    <div className={`chat-bubble assistant-bubble tone-border-${response.tono || "directo"}`}>
+      {localFallback && <p className="coach-local-note">Respuesta local: Gemini no estaba disponible.</p>}
+      <p className="coach-answer">{response.respuesta}</p>
+      {response.accion_inmediata && <div className="coach-action"><span>Acción inmediata</span><strong>{response.accion_inmediata}</strong></div>}
+      {response.modulos_recomendados?.length > 0 && <div className="coach-recommendations">
+        {response.modulos_recomendados.map((item, index) => <article className="coach-module-card" key={`${item.module}-${index}`}>
+          <div><span>Herramienta recomendada</span><h3>{item.titulo}</h3><p>{item.descripcion}</p></div>
+          <button className="primary-button" onClick={() => onOpen(item.module)}>{item.boton}<ArrowRight size={17} /></button>
+        </article>)}
+      </div>}
+      {response.pregunta_siguiente && <p className="coach-question">{response.pregunta_siguiente}</p>}
+    </div>
+  </div>;
 }
 
 function AntiFallModule({ step, protocol, stats, problemStats, firmness, config, fallbackMessage, onPatch, onStart, onAnalyze, onGenerateAction, onStep, onFinish, onMenu }) {

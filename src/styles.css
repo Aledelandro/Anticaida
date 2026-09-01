@@ -1084,6 +1084,243 @@ blockquote {
   gap: 9px;
 }
 
+.coach-screen {
+  gap: 20px;
+}
+
+.coach-heading {
+  display: flex;
+  align-items: flex-start;
+  gap: 18px;
+}
+
+.coach-heading > div:last-child {
+  display: grid;
+  gap: 10px;
+}
+
+.coach-heading h1 {
+  font-size: clamp(2rem, 5vw, 3.8rem);
+}
+
+.coach-suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.coach-suggestions button {
+  min-height: 38px;
+  padding: 0 13px;
+  border: 1px solid #303642;
+  border-radius: 999px;
+  background: #181b22;
+  color: #c8cbd1;
+  cursor: pointer;
+  font-size: 0.84rem;
+  font-weight: 750;
+}
+
+.chat-history {
+  display: flex;
+  min-height: 410px;
+  max-height: 62vh;
+  padding: 22px;
+  overflow-y: auto;
+  flex-direction: column;
+  gap: 18px;
+  border: 1px solid #2d3340;
+  border-radius: 8px;
+  background: #111319;
+  scrollbar-color: #343944 #111319;
+}
+
+.chat-empty {
+  display: flex;
+  width: min(440px, 100%);
+  margin: auto;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 12px;
+  color: #858b96;
+  line-height: 1.5;
+}
+
+.chat-empty strong {
+  display: block;
+  margin-bottom: 5px;
+  color: #ffffff;
+}
+
+.chat-row {
+  display: flex;
+  width: 100%;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.chat-row.user {
+  justify-content: flex-end;
+}
+
+.chat-avatar {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 34px;
+  place-items: center;
+  border: 1px solid #343944;
+  border-radius: 7px;
+  background: #20242c;
+}
+
+.chat-bubble {
+  max-width: min(720px, 88%);
+  border-radius: 8px;
+  line-height: 1.58;
+}
+
+.user-bubble {
+  padding: 13px 17px;
+  background: #f2f2f2;
+  color: #08090b;
+  font-weight: 700;
+}
+
+.assistant-bubble {
+  display: grid;
+  width: min(720px, calc(100% - 44px));
+  gap: 16px;
+  padding: 18px;
+  border: 1px solid #303642;
+  background: #181b22;
+}
+
+.tone-border-duro,
+.tone-border-muy_duro {
+  border-left: 3px solid #ff6868;
+}
+
+.tone-border-directo {
+  border-left: 3px solid #d4aa58;
+}
+
+.coach-answer {
+  color: #f2f2f2;
+  font-size: 1.02rem;
+}
+
+.coach-local-note {
+  color: #858b96;
+  font-size: 0.78rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.coach-action {
+  display: grid;
+  gap: 7px;
+  padding: 13px 15px;
+  border-left: 2px solid #ffffff;
+  background: #111319;
+}
+
+.coach-action span,
+.coach-module-card span {
+  color: #858b96;
+  font-size: 0.73rem;
+  font-weight: 850;
+  text-transform: uppercase;
+}
+
+.coach-recommendations {
+  display: grid;
+  gap: 10px;
+}
+
+.coach-module-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 16px;
+  border: 1px solid #343944;
+  border-radius: 8px;
+  background: #20242c;
+}
+
+.coach-module-card > div {
+  display: grid;
+  gap: 6px;
+}
+
+.coach-module-card h3 {
+  margin: 0;
+  font-size: 1.04rem;
+}
+
+.coach-module-card p {
+  color: #a0a0a0;
+  font-size: 0.9rem;
+}
+
+.coach-module-card .primary-button {
+  min-width: max-content;
+}
+
+.coach-question {
+  padding-top: 14px;
+  border-top: 1px solid #303642;
+  color: #ffffff;
+  font-weight: 800;
+}
+
+.coach-thinking {
+  display: flex;
+  align-items: center;
+  color: #a0a0a0;
+}
+
+.ai-dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  margin-right: 10px;
+  border-radius: 50%;
+  background: #ffffff;
+  animation: ai-pulse 900ms ease-in-out infinite;
+}
+
+.coach-composer {
+  display: grid;
+  gap: 10px;
+  padding: 18px;
+  border: 1px solid #2d3340;
+  border-radius: 8px;
+  background: #181b22;
+}
+
+.coach-composer > label {
+  font-weight: 850;
+}
+
+.coach-composer textarea {
+  min-height: 92px;
+  background: #111319;
+}
+
+.coach-composer-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.coach-composer-actions > span {
+  color: #777d88;
+  font-size: 0.78rem;
+}
+
 @keyframes enter {
   from {
     opacity: 0;
@@ -1114,6 +1351,7 @@ blockquote {
 
   .topbar,
   .step-header,
+  .coach-heading,
   .menu-heading-row {
     align-items: stretch;
     flex-direction: column;
@@ -1155,6 +1393,26 @@ blockquote {
   .step-title {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .coach-module-card,
+  .coach-composer-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .chat-history {
+    min-height: 360px;
+    max-height: 58vh;
+    padding: 14px;
+  }
+
+  .chat-bubble {
+    max-width: 94%;
+  }
+
+  .assistant-bubble {
+    width: calc(100% - 44px);
   }
 
   .step-runner {

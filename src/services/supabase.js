@@ -409,6 +409,43 @@ export async function updateDeepWorkMemory(userId, session) {
   }
 }
 
+export async function getCoachHistory(userId, limit = 30) {
+  if (!supabase || !userId) return [];
+  const { data, error } = await supabase
+    .from("coach_conversations")
+    .select("id,user_message,assistant_response,created_at")
+    .eq("user_id", userId)
+    .order("created_at", { ascending: false })
+    .limit(limit);
+  if (error) throw error;
+  return (data || []).reverse();
+}
+
+export async function saveCoachExchange(userId, userMessage, assistantResponse) {
+  if (!supabase || !userId) throw new Error(supabaseConfigurationError || "Supabase no está configurado.");
+  const { data, error } = await supabase.from("coach_conversations").insert({
+    user_id: userId,
+    user_message: String(userMessage || "").trim(),
+    assistant_response: assistantResponse
+  }).select().single();
+  if (error) throw error;
+  return data;
+}
+
+export async function saveCoachMemories(userId, memories = []) {
+  if (!supabase || !userId || !memories.length) return;
+  for (const memory of memories) {
+    const { error } = await supabase.from("user_memory").upsert({
+      user_id: userId,
+      category: memory.category,
+      memory_key: memory.memory_key,
+      memory_value: memory.memory_value,
+      updated_at: new Date().toISOString()
+    }, { onConflict: "user_id,category,memory_key" });
+    if (error) throw memoryTableError(error);
+  }
+}
+
 function cleanUndefined(payload) {
   Object.keys(payload).forEach((key) => {
     if (payload[key] === undefined) payload[key] = null;
