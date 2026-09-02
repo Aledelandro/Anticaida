@@ -4,7 +4,7 @@ import { Activity, AlertTriangle, ArrowRight, BarChart3, Bot, CheckCircle2, Chev
 import "./styles.css";
 import AiLoadingScreen, { AI_LOADING_CONFIG } from "./AiLoadingScreen";
 import { getProblemConfig, problemOptions } from "./problemConfigs";
-import { analyzeAntiFallWithGemini, analyzeCoachMessageWithGemini, analyzeDeepWorkWithGemini, analyzeLaunchWithGemini, generateLaunchQuestionnaireWithGemini } from "./services/gemini";
+import { analyzeAntiFallWithGemini, analyzeCoachMessageWithGemini, analyzeDeepWorkWithGemini, analyzeLaunchWithGemini, generateLaunchQuestionnaireWithGemini, validateDeepWorkPlan, validateLaunchPlan } from "./services/gemini";
 import { detectCoachIntent, getLocalCoachResponse, normalizeCoachResult, readLocalCoachMessages, saveLocalCoachExchange } from "./services/coach";
 import {
   buildGeminiPayload, createDeepWorkRecord, createLaunchRecord, createProtocolRecord, fallbackAnalysis, getCombinedStats, getDeepWorkStats, getLaunchStats, getLocalDeepWorkPlan, getLocalLaunchPlan, getLocalLaunchQuestionnaire, getStats,
@@ -38,7 +38,7 @@ const launchBlockages = [
   "Estoy cansado", "Quiero hacer otra cosa", "Estoy buscando hacerlo perfecto", "Otro"
 ];
 
-const AI_FALLBACK_MESSAGE = "La IA tardó demasiado. He preparado una versión local para que sigas ejecutando.";
+const AI_FALLBACK_MESSAGE = "La IA tardó o respondió mal. He preparado una versión local para que sigas ejecutando.";
 
 function toneFromFailures(failStreak, config) {
   const messages = config?.hardMessages || [];
@@ -534,7 +534,7 @@ function App() {
         ultimos_5: launchHistory.slice(0, 5), userContext
       });
       if (request.cancelled) return;
-      const plan = normalizeLaunchPlan(result, local);
+      const plan = validateLaunchPlan(result, local);
       if (plan === local) useLocalFallback();
       else {
         patchLaunch({ analysis: plan, duration: plan.duracion_recomendada });
@@ -597,7 +597,7 @@ function App() {
         historial_trabajo_profundo: userContext.deepWorkSessions?.slice(0, 3)
       });
       if (request.cancelled) return;
-      const plan = normalizeDeepWorkPlan(result, local, deepWork.durationMinutes);
+      const plan = validateDeepWorkPlan(result, local, deepWork.durationMinutes);
       if (plan === local) useLocalFallback();
       else {
         patchDeepWork({ analysis: plan });
@@ -876,45 +876,6 @@ function normalizeQuestionnaire(result, fallback) {
   }).filter((item) => item.question);
   if (questions.length < 3) return fallback;
   return { category: fallback.category, intro: String(result.intro || fallback.intro), questions };
-}
-
-function normalizeLaunchPlan(result, fallback) {
-  if (!result || !Array.isArray(result.pasos) || !result.pasos.length) return fallback;
-  const pasos = result.pasos.slice(0, 6).map((step, index) => ({
-    titulo: String(step?.titulo || `Paso ${index + 1}`),
-    descripcion: String(step?.descripcion || "Ejecuta este paso sin ampliar el alcance."),
-    duracion_minutos: Math.min(10, Math.max(1, Number(step?.duracion_minutos) || 5)),
-    resultado: String(step?.resultado || "Resultado visible completado.")
-  }));
-  const total = pasos.reduce((sum, step) => sum + step.duracion_minutos, 0);
-  if (total < 5 || total > 30) return fallback;
-  const allowedCategories = ["ads", "shopify", "estudio", "video", "producto", "negocio", "otro"];
-  const allowedTones = ["normal", "directo", "duro", "muy_duro"];
-  return {
-    ...fallback, ...result, pasos,
-    categoria_tarea: allowedCategories.includes(result.categoria_tarea) ? result.categoria_tarea : fallback.categoria_tarea,
-    duracion_recomendada: total,
-    no_hacer: Array.isArray(result.no_hacer) && result.no_hacer.length ? result.no_hacer.map(String).slice(0, 5) : fallback.no_hacer,
-    tono: allowedTones.includes(result.tono) ? result.tono : fallback.tono
-  };
-}
-
-function normalizeDeepWorkPlan(result, fallback, duration) {
-  if (!result || !Array.isArray(result.pasos) || !result.pasos.length) return fallback;
-  const pasos = result.pasos.slice(0, 8).map((step, index) => ({
-    titulo: String(step?.titulo || `Paso ${index + 1}`),
-    descripcion: String(step?.descripcion || "Ejecuta este paso sin ampliar el alcance."),
-    duracion_minutos: Math.min(25, Math.max(5, Number(step?.duracion_minutos) || 10)),
-    resultado: String(step?.resultado || "Resultado visible completado.")
-  }));
-  const total = pasos.reduce((sum, step) => sum + step.duracion_minutos, 0);
-  if (Math.abs(total - Number(duration)) > Math.max(10, Number(duration) * 0.3)) return fallback;
-  const tones = ["normal", "directo", "duro", "muy_duro"];
-  return {
-    ...fallback, ...result, pasos,
-    distracciones_a_bloquear: Array.isArray(result.distracciones_a_bloquear) ? result.distracciones_a_bloquear.map(String).slice(0, 8) : fallback.distracciones_a_bloquear,
-    tono: tones.includes(result.tono) ? result.tono : fallback.tono
-  };
 }
 
 function TopBar({ currentModule, antiStats, onMenu, onStats }) {

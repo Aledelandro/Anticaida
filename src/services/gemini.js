@@ -2,22 +2,33 @@ import { detectCoachIntent, normalizeCoachModules } from "./coach.js";
 
 const GEMINI_MODEL = "gemini-3.6-flash";
 
-export function safeParseGeminiJson(text) {
-  if (typeof text !== "string" || !text.trim()) return null;
-  const cleaned = text.replace(/```json/gi, "").replace(/```/g, "").trim();
+export function extractJson(text) {
+  if (!text || typeof text !== "string") return null;
+
+  const cleaned = text
+    .replace(/```json/gi, "")
+    .replace(/```/g, "")
+    .trim();
+
   try {
     return JSON.parse(cleaned);
-  } catch {
-    const firstBrace = cleaned.indexOf("{");
-    const lastBrace = cleaned.lastIndexOf("}");
-    if (firstBrace < 0 || lastBrace <= firstBrace) return null;
+  } catch {}
+
+  const first = cleaned.indexOf("{");
+  const last = cleaned.lastIndexOf("}");
+
+  if (first !== -1 && last !== -1 && last > first) {
+    const possibleJson = cleaned.slice(first, last + 1);
     try {
-      return JSON.parse(cleaned.slice(firstBrace, lastBrace + 1));
-    } catch {
-      return null;
-    }
+      return JSON.parse(possibleJson);
+    } catch {}
   }
+
+  console.error("Gemini JSON inválido o incompleto:", cleaned.slice(0, 800));
+  return null;
 }
+
+export const safeParseGeminiJson = extractJson;
 
 async function callGemini(prompt, generationOverrides = {}) {
   const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
@@ -44,8 +55,8 @@ async function callGemini(prompt, generationOverrides = {}) {
             }
           ],
           generationConfig: {
-            maxOutputTokens: 1200,
-            temperature: 0.3,
+            maxOutputTokens: 2200,
+            temperature: 0.1,
             responseMimeType: "application/json",
             ...generationOverrides
           }
@@ -71,16 +82,16 @@ async function callGemini(prompt, generationOverrides = {}) {
       return null;
     }
 
-    const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+    const text = data?.candidates?.[0]?.content?.parts
+      ?.map((part) => part?.text || "")
+      .join("");
 
     if (!text) {
       console.error("Gemini sin texto:", data);
       return null;
     }
 
-    const parsed = safeParseGeminiJson(text);
-    if (!parsed) console.error("Gemini JSON parse error: respuesta incompleta o JSON inválido", text);
-    return parsed;
+    return extractJson(text);
   } catch (error) {
     console.error("Gemini fetch error:", error);
     return null;
@@ -103,6 +114,73 @@ function withTimeout(promise, ms = 30000) {
   });
 }
 
+function shortText(value, fallback = "") {
+  return String(value || fallback || "").trim().slice(0, 120);
+}
+
+function normalizePlanSteps(steps, fallbackSteps, { minMinutes, maxMinutes }) {
+  const source = Array.isArray(steps) && steps.length ? steps : fallbackSteps;
+  return (Array.isArray(source) ? source : []).slice(0, 4).map((step, index) => ({
+    titulo: shortText(step?.titulo, `Paso ${index + 1}`),
+    descripcion: shortText(step?.descripcion, "Ejecuta este paso sin ampliar el alcance."),
+    duracion_minutos: Math.min(maxMinutes, Math.max(minMinutes, Number(step?.duracion_minutos) || minMinutes)),
+    resultado: shortText(step?.resultado, "Resultado visible completado.")
+  }));
+}
+
+export function validateLaunchPlan(result, fallback = {}) {
+  if (!result || typeof result !== "object") return fallback;
+  const allowedCategories = ["ads", "shopify", "estudio", "video", "producto", "negocio", "otro"];
+  const allowedTones = ["normal", "directo", "duro", "muy_duro"];
+  const pasos = normalizePlanSteps(result.pasos, fallback.pasos, { minMinutes: 1, maxMinutes: 10 });
+  const fallbackDuration = Number(fallback.duracion_recomendada) || pasos.reduce((sum, step) => sum + step.duracion_minutos, 0) || 10;
+  const requestedDuration = typeof result.duracion_recomendada === "number" && Number.isFinite(result.duracion_recomendada)
+    ? result.duracion_recomendada
+    : fallbackDuration;
+  const noHacerSource = Array.isArray(result.no_hacer) && result.no_hacer.length ? result.no_hacer : fallback.no_hacer;
+
+  return {
+    ...fallback,
+    diagnostico: shortText(result.diagnostico, fallback.diagnostico),
+    categoria_tarea: allowedCategories.includes(result.categoria_tarea) ? result.categoria_tarea : fallback.categoria_tarea,
+    accion_minima: shortText(result.accion_minima, fallback.accion_minima),
+    duracion_recomendada: Math.min(30, Math.max(1, requestedDuration)),
+    pasos: pasos.length ? pasos : normalizePlanSteps(fallback.pasos, [], { minMinutes: 1, maxMinutes: 10 }),
+    primer_movimiento: shortText(result.primer_movimiento, fallback.primer_movimiento),
+    mensaje_directo: shortText(result.mensaje_directo, fallback.mensaje_directo),
+    no_hacer: (Array.isArray(noHacerSource) ? noHacerSource : []).map((item) => shortText(item)).filter(Boolean).slice(0, 3),
+    siguiente_paso_si_termina: shortText(result.siguiente_paso_si_termina, fallback.siguiente_paso_si_termina),
+    tono: allowedTones.includes(result.tono) ? result.tono : fallback.tono
+  };
+}
+
+export function validateDeepWorkPlan(result, fallback = {}, duration) {
+  if (!result || typeof result !== "object") return fallback;
+  const tones = ["normal", "directo", "duro", "muy_duro"];
+  let pasos = normalizePlanSteps(result.pasos, fallback.pasos, { minMinutes: 5, maxMinutes: 25 });
+  const requestedDuration = Number(duration);
+  const total = pasos.reduce((sum, step) => sum + step.duracion_minutos, 0);
+  if (requestedDuration > 0 && Math.abs(total - requestedDuration) > Math.max(10, requestedDuration * 0.3)) {
+    pasos = normalizePlanSteps(fallback.pasos, [], { minMinutes: 5, maxMinutes: 25 });
+  }
+  const distractionsSource = Array.isArray(result.distracciones_a_bloquear) && result.distracciones_a_bloquear.length
+    ? result.distracciones_a_bloquear
+    : fallback.distracciones_a_bloquear;
+
+  return {
+    ...fallback,
+    diagnostico: shortText(result.diagnostico, fallback.diagnostico),
+    objetivo_reformulado: shortText(result.objetivo_reformulado, fallback.objetivo_reformulado),
+    regla_del_bloque: shortText(result.regla_del_bloque, fallback.regla_del_bloque),
+    pasos,
+    distracciones_a_bloquear: (Array.isArray(distractionsSource) ? distractionsSource : []).map((item) => shortText(item)).filter(Boolean).slice(0, 3),
+    mensaje_directo: shortText(result.mensaje_directo, fallback.mensaje_directo),
+    criterio_de_exito: shortText(result.criterio_de_exito, fallback.criterio_de_exito),
+    si_te_bloqueas: shortText(result.si_te_bloqueas, fallback.si_te_bloqueas),
+    tono: tones.includes(result.tono) ? result.tono : fallback.tono
+  };
+}
+
 export async function analyzeAntiFallWithGemini(payload) {
   const prompt = `Eres el analizador del Sistema Anticaída. No des motivación genérica. Convierte el problema en una acción concreta y breve. Devuelve SOLO JSON válido: {"diagnostico":"string","tono":"normal | directo | duro | muy_duro","reset_fisico":"string","accion_minima":"string","mensaje_duro":"string","blindaje_recomendado":"string","pregunta_reflexion":"string"}. Datos: ${JSON.stringify(payload)}`;
   try {
@@ -117,15 +195,26 @@ export async function analyzeAntiFallWithGemini(payload) {
 
 export async function analyzeLaunchWithGemini(payload) {
   const prompt = `Eres el cerebro de “Arranque 10”. Tu objetivo es convertir una tarea grande en un plan de ejecución pequeño, cómodo y accionable. No des motivación genérica. No expliques teoría. No des un plan enorme. No hagas que el usuario tenga que pensar más. Usa las respuestas del cuestionario.
-Reglas: cada paso dura entre 1 y 10 minutos; el plan total entre 5 y 30 minutos; cada paso tiene un resultado visible; la primera acción puede hacerse ahora; limita anuncios a una campaña/copy/creativo concreto, Shopify a una sección, estudio a una página/tema/ejercicio y vídeo a hook/guion corto/primer corte; endurece el tono ante abandonos repetidos.
-Devuelve SOLO JSON válido: {"diagnostico":"string","categoria_tarea":"ads | shopify | estudio | video | producto | negocio | otro","accion_minima":"string","duracion_recomendada":10,"pasos":[{"titulo":"string","descripcion":"string","duracion_minutos":5,"resultado":"string"}],"primer_movimiento":"string","mensaje_directo":"string","no_hacer":["string","string","string"],"siguiente_paso_si_termina":"string","tono":"normal | directo | duro | muy_duro"}.
+Reglas: máximo 4 pasos; cada paso dura entre 1 y 10 minutos; el plan total entre 5 y 30 minutos; cada paso tiene un resultado visible; la acción mínima es concreta y puede hacerse ahora; no hagas análisis largo ni repitas la tarea en frases enormes; limita anuncios a una campaña/copy/creativo concreto, Shopify a una sección, estudio a una página/tema/ejercicio y vídeo a hook/guion corto/primer corte; endurece el tono ante abandonos repetidos. Si la tarea es “hacer bundles”, pregunta o decide algo concreto, por ejemplo: “Define 2 packs y un descuento. No cambies toda la oferta.”
+
+IMPORTANTE:
+Devuelve SOLO JSON válido.
+No uses markdown.
+No uses explicaciones largas.
+No uses párrafos largos.
+No uses comillas simples dentro de frases largas si pueden romper JSON.
+Cada string debe ser corto, con un máximo de 120 caracteres por campo de texto.
+Incluye máximo 4 pasos y máximo 3 elementos en “no_hacer”.
+No escribas más de 900 palabras en total. Si necesitas resumir, resume.
+
+Usa este formato exacto:
+{"diagnostico":"string corto","categoria_tarea":"ads | shopify | estudio | video | producto | negocio | otro","accion_minima":"string corto","duracion_recomendada":10,"pasos":[{"titulo":"string corto","descripcion":"string corto","duracion_minutos":5,"resultado":"string corto"}],"primer_movimiento":"string corto","mensaje_directo":"string corto","no_hacer":["string corto","string corto"],"siguiente_paso_si_termina":"string corto","tono":"normal | directo | duro | muy_duro"}.
 Datos: ${JSON.stringify(payload)}`;
   try {
     const result = await withTimeout(callGemini(prompt), 30000);
-    if (!result) throw new Error("Gemini no devolvió una respuesta válida");
-    return result;
+    return result || null;
   } catch (error) {
-    console.error("Gemini launch10 plan error:", error.message);
+    console.error("Gemini JSON inválido:", error);
     return null;
   }
 }
@@ -148,15 +237,26 @@ Datos: ${JSON.stringify(taskData)}`;
 
 export async function analyzeDeepWorkWithGemini(payload) {
   const prompt = `Prepara un bloque de Trabajo Profundo práctico y sin teoría. Convierte la tarea en pocos pasos ejecutables con resultado visible.
-Reglas: total cercano a la duración elegida; pasos de 5 a 25 minutos; primer paso inmediato; reduce el alcance si es grande; anuncios: campaña/copy/creativo; web: una sección; estudio: un tema/ejercicio; vídeo: hook/guion/grabación/edición. Usa la memoria para detectar distracciones y endurecer el tono sin insultar.
-Devuelve SOLO JSON válido: {"diagnostico":"string","objetivo_reformulado":"string","regla_del_bloque":"string","pasos":[{"titulo":"string","descripcion":"string","duracion_minutos":10,"resultado":"string"}],"distracciones_a_bloquear":["string"],"mensaje_directo":"string","criterio_de_exito":"string","si_te_bloqueas":"string","tono":"normal | directo | duro | muy_duro"}.
+Reglas: máximo 4 pasos; total cercano a la duración elegida; pasos de 5 a 25 minutos; primer paso inmediato; reduce el alcance si es grande; no escribas textos largos ni frases interminables; anuncios: campaña/copy/creativo; web: una sección; estudio: un tema/ejercicio; vídeo: hook/guion/grabación/edición. Usa la memoria para detectar distracciones y endurecer el tono sin insultar.
+
+IMPORTANTE:
+Devuelve SOLO JSON válido y no devuelvas nada fuera del JSON.
+No uses markdown.
+No uses explicaciones largas.
+No uses párrafos largos.
+No uses comillas simples dentro de frases largas si pueden romper JSON.
+Cada string debe ser corto, con un máximo de 120 caracteres por campo de texto.
+Incluye máximo 4 pasos y máximo 3 elementos en cualquier lista.
+No escribas más de 900 palabras en total. Si necesitas resumir, resume.
+
+Usa este formato exacto:
+{"diagnostico":"string corto","objetivo_reformulado":"string corto","regla_del_bloque":"string corto","pasos":[{"titulo":"string corto","descripcion":"string corto","duracion_minutos":10,"resultado":"string corto"}],"distracciones_a_bloquear":["string corto","string corto"],"mensaje_directo":"string corto","criterio_de_exito":"string corto","si_te_bloqueas":"string corto","tono":"normal | directo | duro | muy_duro"}.
 Datos: ${JSON.stringify(payload)}`;
   try {
     const result = await withTimeout(callGemini(prompt), 35000);
-    if (!result) throw new Error("Gemini no devolvió una respuesta válida");
-    return result;
+    return result || null;
   } catch (error) {
-    console.error("Gemini deep work error:", error.message);
+    console.error("Gemini JSON inválido:", error);
     return null;
   }
 }

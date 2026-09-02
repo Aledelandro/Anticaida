@@ -376,7 +376,7 @@ export function getLocalDeepWorkPlan(data, memory = {}) {
     ["Revisar y guardar", "Comprueba lo esencial y deja el resultado guardado.", "Resultado revisado y guardado."]
   ];
   const duration = Number(data.durationMinutes || 45);
-  const count = Math.min(templates.length, Math.max(2, Math.floor(duration / 10)));
+  const count = Math.min(4, templates.length, Math.max(2, Math.floor(duration / 10)));
   const selected = templates.slice(0, count);
   const base = Math.floor(duration / count);
   const remainder = duration - base * count;
