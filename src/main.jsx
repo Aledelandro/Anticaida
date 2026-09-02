@@ -5,7 +5,7 @@ import "./styles.css";
 import AiLoadingScreen, { AI_LOADING_CONFIG } from "./AiLoadingScreen";
 import { getProblemConfig, problemOptions } from "./problemConfigs";
 import { analyzeAntiFallWithGemini, analyzeCoachMessageWithGemini, analyzeDeepWorkWithGemini, analyzeLaunchWithGemini, generateLaunchQuestionnaireWithGemini } from "./services/gemini";
-import { getLocalCoachResponse, normalizeCoachResult, readLocalCoachMessages, saveLocalCoachExchange } from "./services/coach";
+import { detectCoachIntent, getLocalCoachResponse, normalizeCoachResult, readLocalCoachMessages, saveLocalCoachExchange } from "./services/coach";
 import {
   buildGeminiPayload, createDeepWorkRecord, createLaunchRecord, createProtocolRecord, fallbackAnalysis, getCombinedStats, getDeepWorkStats, getLaunchStats, getLocalDeepWorkPlan, getLocalLaunchPlan, getLocalLaunchQuestionnaire, getStats,
   markActiveFailureIfNeeded, readDeepWorkHistory, readHistory, readLaunchHistory, recordProtocolStarted, saveActiveProtocol,
@@ -222,6 +222,7 @@ function App() {
     try {
       const userContext = await getGeminiContext();
       const fallback = getLocalCoachResponse(message, userContext);
+      const detectedIntent = detectCoachIntent(message);
       const shortHistory = coachMessages.slice(-8).map((item) => item.role === "user"
         ? { role: "user", content: item.text }
         : { role: "assistant", content: item.response?.respuesta || "" }
@@ -236,9 +237,10 @@ function App() {
           deep_work: userContext.deepWorkSessions?.slice(0, 5)
         },
         historial_chat: shortHistory,
+        ruta_local: detectedIntent,
         modulos_disponibles: ["antifall", "launch10", "deepwork", "stats", "profile"]
       });
-      const response = normalizeCoachResult(result, fallback);
+      const response = normalizeCoachResult(result, fallback, detectedIntent);
       const assistantEntry = {
         id: `local-assistant-${Date.now()}`,
         role: "assistant",
@@ -1026,6 +1028,7 @@ function CoachResponse({ response, localFallback, onOpen }) {
   const blocks = Array.isArray(response.bloques) ? response.bloques : [];
   const moduleBlockCount = blocks.filter((block) => block.type === "module").length;
   const recommendations = Array.isArray(response.modulos_recomendados) ? response.modulos_recomendados : [];
+  const questionInBlocks = blocks.some((block) => block.type === "text" && block.content === response.pregunta_siguiente);
   return <div className="chat-row assistant">
     <div className="chat-avatar"><Bot size={18} /></div>
     <div className={`chat-bubble assistant-bubble tone-border-${response.tono || "directo"}`}>
@@ -1040,7 +1043,7 @@ function CoachResponse({ response, localFallback, onOpen }) {
       {!blocks.length && recommendations.length > 0 && <div className={`coach-recommendations module-count-${recommendations.length}`}>
         {recommendations.map((item, index) => <CoachModuleCard item={item} onOpen={onOpen} key={`${item.module}-${index}`} />)}
       </div>}
-      {response.pregunta_siguiente && <p className="coach-question">{response.pregunta_siguiente}</p>}
+      {response.pregunta_siguiente && !questionInBlocks && <p className="coach-question">{response.pregunta_siguiente}</p>}
     </div>
   </div>;
 }

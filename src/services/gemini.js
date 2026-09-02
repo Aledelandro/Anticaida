@@ -1,3 +1,5 @@
+import { detectCoachIntent, normalizeCoachModules } from "./coach.js";
+
 const GEMINI_MODEL = "gemini-3.6-flash";
 
 export function safeParseGeminiJson(text) {
@@ -160,6 +162,10 @@ Datos: ${JSON.stringify(payload)}`;
 }
 
 export async function analyzeCoachMessageWithGemini(payload) {
+  const routedPayload = {
+    ...payload,
+    ruta_local: payload?.ruta_local || detectCoachIntent(payload?.mensaje_usuario)
+  };
   const prompt = `Eres el Asistente de Ejecución de una app llamada “Modo Ejecución”.
 
 Tu función es ayudar al usuario cuando se bloquea, cae, duda, procrastina o necesita decidir qué hacer.
@@ -177,6 +183,14 @@ Herramientas disponibles:
 
 Criterios: si ha jugado, recaído, abandonado o fallado, recomienda antifall; si no consigue empezar, launch10; si ya sabe qué hacer y necesita foco, deepwork; en dudas de negocio piensa de forma práctica y recomienda launch10 o deepwork; conecta mentalidad con acción; usa la memoria real; endurece el tono ante patrones repetidos o según la preferencia, sin insultar. Responde de forma directa, útil y breve.
 
+Regla principal:
+Si el usuario ya ha fallado, jugado, recaído o roto su compromiso, recomienda Sistema Anticaída primero. No recomiendes Arranque 10 como primera opción en una caída ya ocurrida.
+Arranque 10 solo se recomienda cuando el usuario todavía no ha caído y necesita empezar una tarea.
+Trabajo Profundo solo se recomienda cuando el usuario ya tiene objetivo y quiere foco.
+Si Contexto real incluye una ruta_local, respétala como clasificación prioritaria. Una caída siempre gana ante una mezcla de caída y bloqueo de inicio.
+
+Límites obligatorios: respuesta máximo 450 caracteres; diagnóstico máximo 160 caracteres; acción inmediata máximo 160 caracteres; pregunta siguiente máximo 120 caracteres; máximo 2 bloques de texto; máximo 2 módulos recomendados.
+
 Construye la respuesta como una secuencia ordenada de bloques:
 - Primero responde al problema con un bloque type "text".
 - Si recomiendas una herramienta, crea un bloque type "module". No metas botones ni nombres de botones dentro del texto.
@@ -188,14 +202,14 @@ Construye la respuesta como una secuencia ordenada de bloques:
 Devuelve SOLO JSON válido. No uses saltos raros dentro de strings. No uses comillas sin escapar. No uses markdown. Completa y cierra siempre todos los strings, arrays y objetos.
 
 Devuelve SOLO JSON válido con esta forma exacta:
-{"bloques":[{"type":"text","content":"string"},{"type":"module","module":"antifall | launch10 | deepwork | stats | profile","titulo":"string","descripcion":"string","boton":"string"}],"respuesta":"string","diagnostico":"string","tono":"normal | directo | duro | muy_duro","tipo_problema":"caida | procrastinacion | arranque | trabajo_profundo | decision | emprendimiento | mentalidad | organizacion | otro","modulos_recomendados":[],"accion_inmediata":"string","pregunta_siguiente":"string","memorias_a_guardar":[{"category":"string","memory_key":"string","memory_value":{}}]}.
+{"bloques":[{"type":"text","content":"string"},{"type":"module","module":"antifall | launch10 | deepwork | stats | profile","titulo":"string","descripcion":"string","boton":"string"}],"respuesta":"string","diagnostico":"string","tono":"normal | directo | duro | muy_duro","tipo_problema":"caida | procrastinacion | arranque | trabajo_profundo | decision | emprendimiento | mentalidad | organizacion | otro","modulos_recomendados":[{"module":"antifall | launch10 | deepwork | stats | profile","titulo":"string","descripcion":"string","boton":"string"}],"accion_inmediata":"string","pregunta_siguiente":"string","memorias_a_guardar":[{"category":"string","memory_key":"string","memory_value":{}}]}.
 
-Contexto real: ${JSON.stringify(payload)}`;
+Contexto real: ${JSON.stringify(routedPayload)}`;
   try {
     const result = await withTimeout(callGemini(prompt, {
       responseMimeType: "application/json",
-      maxOutputTokens: 1600,
-      temperature: 0.2
+      maxOutputTokens: 3000,
+      temperature: 0.1
     }), 30000);
     if (!result) throw new Error("Gemini no devolvió una respuesta válida");
     return result;
@@ -206,4 +220,4 @@ Contexto real: ${JSON.stringify(payload)}`;
 }
 
 export const analyzeWithGemini = analyzeAntiFallWithGemini;
-export { callGemini, withTimeout };
+export { callGemini, detectCoachIntent, normalizeCoachModules, withTimeout };
